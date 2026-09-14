@@ -1,231 +1,171 @@
-﻿using Newtonsoft.Json;
-using System;
-using System.ComponentModel.DataAnnotations;
-using System.Security.Cryptography;
-using System.Text;
+using Microsoft.Extensions.Configuration;
+using TraderApp.Configuration;
+using TraderApp.Exchange;
+using TraderApp.Notifications;
+using TraderApp.Trading;
 
-namespace TraderApp // Note: actual namespace depends on the project name.
+namespace TraderApp;
+
+internal static class Program
 {
-
-    interface IPayload
+    private static async Task<int> Main(string[] args)
     {
-        public bool NonceWindow { get; set; }
-        public string Request { get; set; }
-        public string Nonce { get; set; }
-    }
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-    class Payload : IPayload
-    {
-        [JsonProperty("request")]
-        public string Request { get; set; }
+        var config = LoadConfig(args);
 
-        [JsonProperty("nonce")]
-        public string Nonce { get; set; }
-
-        [JsonProperty("nonceWindow")]
-        public bool NonceWindow { get; set; }
-
-        [JsonProperty("ticker")]
-        public string Ticker { get; set; }
-    }
-
-    class LimitOrder : Payload
-    {
-        [JsonProperty("market")]
-        public string Market { get; set; }
-
-        [JsonProperty("side")]
-        public string Side { get; set; }
-
-        [JsonProperty("amount")]
-        public decimal Amount { get; set; }
-
-        [JsonProperty("price")]
-        public string Price { get; set; }
-    }
-
-
-    /*
-    {
-    "positionId": 527,                         // position ID
-    "market": "BTC_USDT",                      // market name
-    "openDate": 1651568067.789679,             // date of position opening
-    "modifyDate": 1651568067.789679,           // date of position modifying (this is date of current event)
-    "amount": "0.1",                           // amount of order
-    "basePrice": "45658.349",                  // base price of position
-    "liquidationPrice": null,                  // liquidation price according to current state of position
-    "liquidationState": null,                  // state of liquidation. Possible values: null, margin_call, liquidation
-    "pnl": "-168.42",                          // current profit and loss in **money**
-    "pnlPercent": "-0.43",                     // current profit and loss in percentage
-    "margin": "8316.74",                       // amount of funds in open position **money**
-    "freeMargin": "619385.67",                 // free funds for trading according to
-    "funding": "0",                            // funding that will be paid on next position stage change (order, liquidation, etc)
-    "unrealizedFunding": "0.0019142920201966", // funding that will be paid on next position stage change (order, liquidation, etc)
-    }
-   */
-    class PositionBase
-    {
-        [JsonProperty("positionId")]
-        public long PositionId { get; set; }
-
-        [JsonProperty("market")]
-        public string Market { get; set; }
-
-        [JsonProperty("openDate")]
-        public string OpenDate { get; set; }
-
-        [JsonProperty("amount")]
-        public decimal Amount { get; set; }
-
-        [JsonProperty("basePrice")]
-        public string BasePrice { get; set; }
-
-        [JsonProperty("liquidationPrice")]
-        public string LiquidationPrice { get; set; }
-
-        [JsonProperty("liquidationState")]
-        public string LiquidationState { get; set; }
-    }
-
-    class Position : PositionBase
-    {
-        [JsonProperty("pnl")]
-        public decimal Pnl { get; set; }
-
-        [JsonProperty("pnlPercent")]
-        public string PnlPercent { get; set; }
-
-        [JsonProperty("margin")]
-        public string Margin { get; set; }
-
-        [JsonProperty("freeMargin")]
-        public string freeMargin { get; set; }
-
-        [JsonProperty("funding")]
-        public string Funding { get; set; }
-
-        [JsonProperty("unrealizedFunding")]
-        public string UnrealizedFunding { get; set; }
-    }
-
-    public class Order
-    {
-        [JsonProperty("orderId")]
-        public string OrderId { get; set; }
-    }
-
-    internal class Program
-    {
-        private static readonly HttpClient _httpClient = new HttpClient();
-
-        private static string apiKey = "811d1819b6786ac56c7b85bfd32b3d35"; // put here your public key
-        private static string apiSecret = "d86a88f708f571c6d560bdb2697c8556"; // put here your secret key
-        private static string hostname = "https://whitebit.com"; // domain without last slash. Do not use whitebit.com/
-
-        private static Timer? _timer;
-
-        private async static void TimerCallback(Object o)
+        // CLI overrides, for the two switches you most want to be explicit about.
+        if (args.Contains("--live", StringComparer.OrdinalIgnoreCase))
         {
-            var response = await CallApi<Position[]>("/api/v4/collateral-account/positions/open", new LimitOrder { Market = "SOL_USDT" });
-            if (response != null && response.Length > 0)
-            {
-                foreach (var item in response)
-                {
-                    Console.WriteLine($"PNL: {item.Pnl}, {item.Market}");
-                    if (item.Pnl > 20)
-                    {
-                        Console.WriteLine("Order {0}", JsonConvert.SerializeObject(item));
-                        var x = await CallApi<Order>("/api/v4/order/collateral/limit",
-                            new LimitOrder
-                            {
-                                Market = item.Market,
-                                Amount = Math.Abs(item.Amount),
-                                Side = item.Amount < 0 ? "buy" : "sell",
-                                Price = "26"
-                            });
-                        Console.WriteLine(x);
-                    }
-                }
-            }
-            else
-                Console.WriteLine("Skip");
+            config.Trading.DryRun = false;
+            config.Trading.IUnderstandThisTradesRealMoney = true;
         }
-        private static async Task Main()
+        if (args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase))
+            config.Trading.DryRun = true;
+
+        var signalsOnly = args.Contains("--signals-only", StringComparer.OrdinalIgnoreCase);
+
+        if (args.Contains("--telegram-test", StringComparer.OrdinalIgnoreCase))
+            return await TelegramNotifier.RunSetupCheckAsync(config.Telegram, CancellationToken.None);
+
+        Log.ToFile(Path.Combine(AppContext.BaseDirectory, "logs", $"trader-{DateTime.UtcNow:yyyyMMdd}.log"));
+
+        var errors = config.Validate();
+        if (signalsOnly)
         {
-            _timer = new Timer(TimerCallback, null, 0, 1000);
-            Console.ReadLine();
-            _timer.Dispose();
-
-            //var responseBody = await CallApi("/api/v4/trade-account/balance");
-            //Console.WriteLine(responseBody);
-            //Console.ReadKey();
-
-            //responseBody = await CallApi("/api/v4/orders");
-            //Console.WriteLine(responseBody);
-            //Console.ReadKey();
-
-            //responseBody = await CallApi("/api/v4/collateral-account/positions/open");
-            //Console.WriteLine(responseBody);
-
-            //Console.ReadKey();
+            // Public endpoints only - credentials are irrelevant here.
+            errors = errors.Where(e => !e.StartsWith("Api.", StringComparison.Ordinal)).ToList();
+        }
+        if (errors.Count > 0)
+        {
+            foreach (var e in errors) Log.Error(e);
+            Log.Error("configuration is invalid - aborting");
+            return 1;
         }
 
-        private static async Task<T?> CallApi<T>(string method, IPayload? payloadData = null)
+        var live = !signalsOnly && !config.Trading.DryRun && config.Trading.IUnderstandThisTradesRealMoney;
+
+        PrintBanner(config, live, signalsOnly);
+
+        if (live && !ConfirmLive())
         {
-            var data = payloadData ?? new Payload();
+            Log.Info("live trading not confirmed - exiting");
+            return 0;
+        }
 
-            data.Request = method;
-            data.NonceWindow = false;
-            data.Nonce = GetNonce();
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            Log.Warn("shutdown requested - finishing the current cycle");
+            cts.Cancel();
+        };
 
-            var dataJsonStr = JsonConvert.SerializeObject(data);
-            var payload = Base64Encode(dataJsonStr);
-            var signature = CalcSignature(payload, apiSecret);
+        using var client = new WhiteBitClient(config.Api);
 
-            var content = new StringContent(dataJsonStr, Encoding.UTF8, "application/json");
-            var requestMessage = new HttpRequestMessage(HttpMethod.Post, $"{hostname}{method}")
+        await using var telegram = new TelegramNotifier(config.Telegram);
+        if (telegram.IsConfigured)
+        {
+            Log.SetNotifier(telegram.SendFromLog);
+            Log.Info($"Telegram notifications on (chat {config.Telegram.ChatId})");
+        }
+        else if (config.Telegram.Enabled)
+        {
+            Log.Warn("Telegram is enabled but has no ChatId - run with --telegram-test to find it");
+        }
+
+        try
+        {
+            if (signalsOnly)
             {
-                Content = content
-            };
-            requestMessage.Headers.Add("X-TXC-APIKEY", apiKey);
-            requestMessage.Headers.Add("X-TXC-PAYLOAD", payload);
-            requestMessage.Headers.Add("X-TXC-SIGNATURE", signature);
-
-            var response = await _httpClient.SendAsync(requestMessage);
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
-            {
-                var responseBody = await response.Content.ReadAsStringAsync();
-                return JsonConvert.DeserializeObject<T>(responseBody);
+                await new SignalMonitor(config, client).RunAsync(cts.Token);
             }
             else
             {
-                var responseBody = await response.Content.ReadAsStringAsync();
-                var err = responseBody;
-            }
-            return default;
-        }
-
-        public static string Base64Encode(string plainText)
-        {
-            var plainTextBytes = Encoding.UTF8.GetBytes(plainText);
-            return Convert.ToBase64String(plainTextBytes);
-        }
-
-        public static string CalcSignature(string text, string apiSecret)
-        {
-            using (var hmac = new HMACSHA512(Encoding.UTF8.GetBytes(apiSecret)))
-            {
-                var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(text));
-                return BitConverter.ToString(hash).Replace("-", string.Empty).ToLower();
+                await using var trader = new AutoTrader(config, client, telegram);
+                await trader.RunAsync(cts.Token);
             }
         }
-        private static string GetNonce()
+        catch (InvalidOperationException ex)
         {
-            var milliseconds = (long)DateTime.Now.ToUniversalTime()
-                .Subtract(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc))
-                .TotalMilliseconds;
-
-            return milliseconds.ToString();
+            Log.Error(ex.Message);
+            return 3;
         }
+        catch (Exception ex)
+        {
+            Log.Error($"fatal: {ex}");
+            return 2;
+        }
+        finally
+        {
+            Log.Info("stopped");
+            Log.SetNotifier(null);
+            Log.Close();
+        }
+
+        return 0;
+    }
+
+    private static BotConfig LoadConfig(string[] _)
+    {
+        var builder = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+            .AddJsonFile("appsettings.local.json", optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables("TRADER_");
+
+        var cfg = builder.Build().Get<BotConfig>() ?? new BotConfig();
+
+        // Convenience aliases so the usual WhiteBIT variable names work too.
+        cfg.Api.Key = FirstNonEmpty(cfg.Api.Key, Environment.GetEnvironmentVariable("WHITEBIT_API_KEY"));
+        cfg.Api.Secret = FirstNonEmpty(cfg.Api.Secret, Environment.GetEnvironmentVariable("WHITEBIT_API_SECRET"));
+        cfg.Telegram.BotToken = FirstNonEmpty(cfg.Telegram.BotToken, Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
+        cfg.Telegram.ChatId = FirstNonEmpty(cfg.Telegram.ChatId, Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID"));
+
+        // Credentials pasted through a shell or a prompt routinely pick up
+        // trailing whitespace, which silently breaks HMAC signing.
+        cfg.Api.Key = cfg.Api.Key.Trim();
+        cfg.Api.Secret = cfg.Api.Secret.Trim();
+        cfg.Telegram.BotToken = cfg.Telegram.BotToken.Trim();
+        cfg.Telegram.ChatId = cfg.Telegram.ChatId.Trim();
+
+        return cfg;
+    }
+
+    private static string FirstNonEmpty(string? a, string? b) =>
+        !string.IsNullOrWhiteSpace(a) ? a : (b ?? "");
+
+    private static void PrintBanner(BotConfig c, bool live, bool signalsOnly)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  TraderApp - WhiteBIT collateral scalper");
+        Console.WriteLine("  ---------------------------------------");
+        Console.ForegroundColor = live ? ConsoleColor.Red : ConsoleColor.Green;
+        Console.WriteLine(signalsOnly
+            ? "  MODE          : SIGNALS ONLY - public data, no API key used"
+            : live
+                ? "  MODE          : LIVE - real orders, real money"
+                : "  MODE          : DRY RUN - decisions logged, nothing sent");
+        Console.ResetColor();
+        Console.WriteLine($"  Endpoint      : {c.Api.BaseUrl}");
+        Console.WriteLine($"  Markets       : {string.Join(", ", c.Trading.Markets)}");
+        Console.WriteLine($"  Timeframes    : {c.Trading.EntryInterval} entry / {c.Trading.RegimeInterval} regime");
+        Console.WriteLine($"  Leverage      : {c.Trading.Leverage}x");
+        Console.WriteLine($"  Risk/trade    : {c.Risk.RiskPerTradePct}% of equity");
+        Console.WriteLine($"  Stop / target : {c.Trading.StopLossAtrMult}x ATR / {c.Trading.TakeProfitAtrMult}x ATR");
+        Console.WriteLine($"  Hard stop     : {c.Trading.HardStopMultiplier}x bot stop, attached to the entry order");
+        Console.WriteLine($"  Max positions : {c.Risk.MaxConcurrentPositions} (max {c.Risk.MaxTotalNotionalUsd} notional)");
+        Console.WriteLine($"  Daily cutout  : -{c.Risk.MaxDailyDrawdownPct}% equity");
+        Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
+        Console.WriteLine("  Ctrl+C to stop.");
+        Console.WriteLine();
+    }
+
+    private static bool ConfirmLive()
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Write("  Type LIVE to confirm real-money trading: ");
+        Console.ResetColor();
+        return string.Equals(Console.ReadLine()?.Trim(), "LIVE", StringComparison.Ordinal);
     }
 }

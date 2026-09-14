@@ -361,3 +361,8 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# Local secrets and runtime output
+appsettings.local.json
+TraderApp/appsettings.local.json
+logs/
+**/logs/
