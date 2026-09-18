@@ -103,7 +103,13 @@ public sealed class TradingConfig
     public int CandleLookback { get; set; } = 100;
 
     /// <summary>Main decision loop period.</summary>
-    public int LoopIntervalMs { get; set; } = 3_000;
+    public int LoopIntervalMs { get; set; } = 2_000;
+
+    /// <summary>
+    /// How often to emit the equity / blocked-setup status lines.
+    /// 1 = every tick. Keep small enough that Railway logs feel alive.
+    /// </summary>
+    public int StatusLogEveryTicks { get; set; } = 5;
 
     /// <summary>Stop distance as a multiple of ATR on the entry timeframe.</summary>
     public decimal StopLossAtrMult { get; set; } = 1.5m;
@@ -210,16 +216,16 @@ public sealed class SignalConfig
     public int DonchianPeriod { get; set; } = 20;
 
     /// <summary>Weighted confluence score a setup must reach before it is tradable.</summary>
-    public double MinScore { get; set; } = 0.68;
+    public double MinScore { get; set; } = 0.58;
 
     /// <summary>Minimum number of independent components that must agree with the direction.</summary>
-    public int MinConfirmations { get; set; } = 4;
+    public int MinConfirmations { get; set; } = 3;
 
     /// <summary>
     /// Minimum weight from event triggers (RSI, Bollinger, volume, book).
     /// Background state (regime / EMA / VWAP) cannot open a trade on its own.
     /// </summary>
-    public double MinTriggerWeight { get; set; } = 0.22;
+    public double MinTriggerWeight { get; set; } = 0.12;
 
 
     /// <summary>
@@ -228,15 +234,21 @@ public sealed class SignalConfig
     /// reflects agreement among a few components while the heavyweights
     /// (regime, rsi) abstain.
     /// </summary>
-    public double MinAgreeingWeight { get; set; } = 0.52;
+    public double MinAgreeingWeight { get; set; } = 0.42;
     /// <summary>Refuse an entry when the last closed bar's volume is this far below its average.</summary>
-    public double MinVolumeRatio { get; set; } = 0.30;
+    public double MinVolumeRatio { get; set; } = 0.40;
 
     /// <summary>In a trend, do not buy when RSI is already this extended — wait for a pullback.</summary>
-    public double MaxTrendRsiLong { get; set; } = 58;
+    public double MaxTrendRsiLong { get; set; } = 65;
 
     /// <summary>In a trend, do not sell when RSI is already this extended — wait for a bounce.</summary>
-    public double MinTrendRsiShort { get; set; } = 42;
+    public double MinTrendRsiShort { get; set; } = 35;
+
+    /// <summary>
+    /// When true, a long requires a non-negative MACD histogram and a short a
+    /// non-positive one. Disable for more activity when other filters already agree.
+    /// </summary>
+    public bool RequireMacdAlign { get; set; } = true;
 
     /// <summary>ADX above this counts as a trending regime; below it, as chop.</summary>
     public double AdxTrendThreshold { get; set; } = 22;
@@ -267,7 +279,7 @@ public sealed class SignalConfig
     ///   Aug-Sep -13.47 -> -0.18   (46.6% -> 54.2%)
     /// It cuts trade count by ~70% and fees by ~80% while raising gross profit.
     /// </summary>
-    public decimal MinAtrPct { get; set; } = 0.60m;
+    public decimal MinAtrPct { get; set; } = 0.35m;
 
     /// <summary>Refuse to trade when ATR% of price is above this - news or panic volatility.</summary>
     public decimal MaxAtrPct { get; set; } = 3.5m;
@@ -320,13 +332,13 @@ public sealed class RiskConfig
     public int LossCooldownMinutes { get; set; } = 60;
 
     /// <summary>Minimum wait between two entries on the same market, in seconds.</summary>
-    public int PerMarketCooldownSeconds { get; set; } = 600;
+    public int PerMarketCooldownSeconds { get; set; } = 300;
 
     /// <summary>Maximum entries per hour across all markets.</summary>
-    public int MaxTradesPerHour { get; set; } = 4;
+    public int MaxTradesPerHour { get; set; } = 6;
 
     /// <summary>Maximum entries per UTC day across all markets.</summary>
-    public int MaxTradesPerDay { get; set; } = 10;
+    public int MaxTradesPerDay { get; set; } = 16;
 
     /// <summary>
     /// Fallback round-trip fee, in percent of notional, used only when the

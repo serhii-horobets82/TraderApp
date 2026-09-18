@@ -134,8 +134,8 @@ nothing.
 | Consecutive losses | 3 | Hard halt (`HaltOnConsecutiveLosses`) |
 | Max concurrent | 1 | One position at a time |
 | Same-direction cap | 1 | No stacked longs/shorts across alts |
-| Per-market cooldown | 600s | No re-entry churn |
-| Trade budget | 4/hour, 10/day UTC | Caps overtrading |
+| Per-market cooldown | 300s | No re-entry churn |
+| Trade budget | 6/hour, 16/day UTC | Caps overtrading |
 | Margin call | on | Flatten + halt |
 
 Set `HaltOnConsecutiveLosses` to `false` if you prefer a cooldown
@@ -163,9 +163,12 @@ The settings worth knowing:
 | `Risk.MaxPeakDrawdownPct` | `2` | Drawdown from session peak (0 = off) |
 | `Risk.MaxDailyProfitPct` | `1.5` | Lock a green day and halt (0 = off) |
 | `Risk.MaxConcurrentPositions` | `1` | One position at a time |
-| `Risk.MaxTradesPerHour` / `MaxTradesPerDay` | `4` / `10` | Overtrading budget |
+| `Risk.MaxTradesPerHour` / `MaxTradesPerDay` | `6` / `16` | Overtrading budget |
 | `Risk.HaltOnConsecutiveLosses` | `true` | 3 losses → session halt (else cooldown) |
-| `Signals.MinScore` | `0.62` | Raise for fewer, higher-conviction trades |
+| `Trading.LoopIntervalMs` | `2000` | Decision loop period |
+| `Trading.StatusLogEveryTicks` | `5` | Status / blocked-setup log cadence (~10s) |
+| `Signals.MinScore` | `0.58` | Raise for fewer, higher-conviction trades |
+| `Signals.RequireMacdAlign` | `false` | When true, MACD histogram must agree with direction |
 
 ### Why the entry timeframe is 15m
 

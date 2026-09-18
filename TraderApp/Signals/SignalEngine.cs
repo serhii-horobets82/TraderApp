@@ -341,7 +341,7 @@ public sealed class SignalEngine
             if (imbDir != Direction.None && imbDir != chosen)
                 vetoes.Add($"book {imbDir} fights the {chosen} setup");
 
-            if (i > 0 && Ta.IsUsable(macd.Histogram[i]))
+            if (_cfg.RequireMacdAlign && i > 0 && Ta.IsUsable(macd.Histogram[i]))
             {
                 var h = macd.Histogram[i];
                 if (chosen == Direction.Long && h < 0)

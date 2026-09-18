@@ -145,6 +145,6 @@ public class HardRiskRulesTests
         Assert.Equal(0.25m, cfg.Risk.RiskPerTradePct);
         Assert.Equal(1, cfg.Risk.MaxConcurrentPositions);
         Assert.True(cfg.Risk.HaltOnConsecutiveLosses);
-        Assert.Equal(10, cfg.Risk.MaxTradesPerDay);
+        Assert.Equal(16, cfg.Risk.MaxTradesPerDay);
     }
 }
