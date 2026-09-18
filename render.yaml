@@ -1,0 +1,25 @@
+# Render Blueprint. Connect the repo once and Render auto-deploys on push to
+# main. A Background Worker has no port and no public URL, which is what this is.
+services:
+  - type: worker
+    name: traderapp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: frankfurt
+    branch: main
+    autoDeploy: true
+    envVars:
+      # Set these in the Render dashboard, not here. Marking them sync:false
+      # keeps them out of the repo and stops a blueprint sync from clearing them.
+      - key: WHITEBIT_API_KEY
+        sync: false
+      - key: WHITEBIT_API_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      # Start safe. Flip to false in the dashboard once you trust it.
+      - key: TRADER_Trading__DryRun
+        value: "true"

@@ -393,6 +393,85 @@ Logs are written to `bin/<config>/net10.0/logs/trader-YYYYMMDD.log`.
 
 ---
 
+## Deploying to Railway (no VPS)
+
+Railway runs the bot as a container and redeploys on every push to `main`.
+`Dockerfile` and `railway.json` in this repo are all it needs.
+
+### 1. Push to a private GitHub repo
+
+```bash
+git remote add origin https://github.com/YOU/TraderApp.git
+```
+
+```bash
+git push -u origin main
+```
+
+### 2. Create the project
+
+[railway.com](https://railway.com) → **New Project** → **Deploy from GitHub
+repo** → pick the repo. Railway finds the root `Dockerfile` and builds with it;
+the first build takes a few minutes because it pulls the .NET SDK image.
+
+### 3. Set variables
+
+Service → **Variables** → add:
+
+| Name | Value |
+|---|---|
+| `WHITEBIT_API_KEY` | your key |
+| `WHITEBIT_API_SECRET` | your secret |
+| `TELEGRAM_BOT_TOKEN` | bot token |
+| `TELEGRAM_CHAT_ID` | `289040655` |
+| `TRADER_Trading__DryRun` | `true` |
+
+The double underscore in `TRADER_Trading__DryRun` is the config binder's
+separator for nested keys; it maps to `Trading.DryRun` and beats
+`appsettings.json`. Leave it `true` until you have watched it run.
+
+### 4. Do not add a domain
+
+This is a worker with no HTTP listener. Railway only exposes a service if you
+generate a domain, so simply skip that — and do not set `healthcheckPath` in
+`railway.json`, because a healthcheck on a service with no port fails every
+deploy.
+
+### 5. Verify
+
+Watch the **Deploy Logs**. The startup banner should read `MODE : DRY RUN`, and
+the Telegram `Started (DRY RUN)` message should arrive. That message is the real
+confirmation — it proves credentials, network and notifications all work.
+
+### 6. Go live when you trust it
+
+Set `TRADER_Trading__DryRun` to `false` and redeploy.
+
+### Things worth knowing
+
+**Rollback** is Deployments → pick the previous one → **Redeploy**. Faster than
+a revert commit, which matters when the thing you are rolling back trades money.
+
+**`watchPatterns`** in `railway.json` limits redeploys to changes under
+`TraderApp/`, the `Dockerfile`, `NuGet.config` and `railway.json`. A redeploy
+restarts the bot, and while it is down only the exchange-side stop protects an
+open position — no reason to take that window for a README edit.
+
+**The filesystem is ephemeral.** The bot's own `logs/` directory is wiped on
+every redeploy. Railway's log viewer and Telegram are the durable record, which
+is a good reason to keep `HeartbeatMinutes` non-zero.
+
+**Static outbound IP needs the Pro plan** ($20/mo, three IPs shared with other
+customers). On Hobby the egress IP is not stable, so you cannot IP-allowlist the
+WhiteBIT API key — the key is then protected only by being secret and
+trade-only. A VPS gives a dedicated fixed IP for less; see the section below.
+
+**Auto-deploy has no human gate.** Every push to `main` changes what is trading
+your money. If that makes you uneasy, disable auto-deploy in service settings
+and press Deploy manually, or work on branches and merge deliberately.
+
+---
+
 ## CI/CD (Netlify-style: merge → live)
 
 Push or merge to `main` or `master` builds the bot and, once a VPS is wired up,
@@ -457,10 +536,49 @@ artifact; the **Deploy** job is skipped.
 ### 4. What a merge does
 
 1. `CI` compiles on every PR and push.
-2. `Deploy` publishes a self-contained `TraderApp` binary.
+2. `Deploy` builds, runs tests if any exist, then publishes a self-contained
+   `TraderApp` binary. A failed build or test stops the deploy.
 3. SCP → `/opt/trader/incoming`
-4. `systemctl stop trader` (open positions are **not** closed)
-5. rsync into `/opt/trader/app`, `systemctl start trader`
+4. The current release is copied to `/opt/trader/previous`
+5. `systemctl stop trader` (open positions are **not** closed)
+6. rsync into `/opt/trader/app`, `systemctl start trader`
+7. **Health check**: wait 30s and confirm the restart counter has not moved.
+   `Restart=always` means a crash-looping binary still reports `active`, so
+   checking `systemctl status` right after start proves nothing. On failure the
+   previous release is restored automatically and the workflow goes red.
+
+### Safety switches
+
+`/etc/trader/env` ships with `TRADER_Trading__DryRun=true`. That env var beats
+`appsettings.json`, so it is the switch to reach for — set it and restart to
+stop trading without a deploy. Leave it on until you have watched the bot run
+on the server.
+
+```bash
+sudo systemctl stop trader
+```
+
+stops it entirely; open positions keep the exchange-side OTO stop attached at
+entry.
+
+### Deploying while a position is open
+
+The bot is down for a few seconds during the swap and re-adopts positions on
+startup. In that gap the bot-managed stop is not enforced and the time stop does
+not run — the protection is the exchange-side stop at `HardStopMultiplier`
+(1.8x) the working stop. That is wider than usual, so avoid pushing to `main`
+mid-session if you can.
+
+### Two things that would otherwise bite
+
+**`NuGet.config` pins the source to nuget.org.** Without it NuGet inherits every
+feed configured on the developer machine; a private Azure DevOps feed answers
+401 to GitHub Actions and restore fails with NU1301 even though local builds
+work off the package cache.
+
+**The unit waits for `time-sync.target`.** The WhiteBIT nonce is a millisecond
+timestamp covered by the request signature, so starting before NTP settles
+produces authentication failures that look exactly like bad credentials.
 
 Manual redeploy: Actions → Deploy → Run workflow.
 

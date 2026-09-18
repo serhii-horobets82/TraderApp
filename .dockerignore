@@ -1,0 +1,13 @@
+# Keep the build context small and never ship secrets or local state.
+**/bin/
+**/obj/
+**/logs/
+**/history-cache/
+.git/
+.github/
+.vs/
+deploy/
+*.user
+*.suo
+appsettings.local.json
+**/appsettings.local.json

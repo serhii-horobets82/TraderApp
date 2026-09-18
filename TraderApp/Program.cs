@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Configuration;
 using TraderApp.Backtest;
 using TraderApp.Configuration;
@@ -54,20 +55,42 @@ internal static class Program
             return 1;
         }
 
-        // Default is live. appsettings DryRun is ignored; only these flags opt out.
-        config.Trading.DryRun = dryRun || signalsOnly;
+        // Any of the three can force dry-run, and none of them can undo another.
+        // The config value has to be honoured or a deployed instance could not be
+        // put into dry-run without editing its systemd unit - set
+        // TRADER_Trading__DryRun=true in /etc/trader/env instead.
+        config.Trading.DryRun = config.Trading.DryRun || dryRun || signalsOnly;
         config.Trading.IUnderstandThisTradesRealMoney = true;
         var live = !signalsOnly && !dryRun;
 
         PrintBanner(config, live, signalsOnly);
 
         using var cts = new CancellationTokenSource();
+
+        void RequestShutdown(string source)
+        {
+            Log.Warn($"shutdown requested ({source}) - finishing the current cycle");
+            // ReSharper disable once AccessToDisposedClosure
+            if (!cts.IsCancellationRequested) cts.Cancel();
+        }
+
         Console.CancelKeyPress += (_, e) =>
         {
             e.Cancel = true;
-            Log.Warn("shutdown requested - finishing the current cycle");
-            cts.Cancel();
+            RequestShutdown("Ctrl+C");
         };
+
+        // Containers and orchestrators stop a process with SIGTERM, which
+        // Console.CancelKeyPress does not see - Docker, Railway, Render, Fly and
+        // Kubernetes all use it. Without this the bot is killed mid-cycle:
+        // resting entry orders are never cancelled and queued Telegram messages
+        // are lost. systemd is configured to send SIGINT instead, but relying on
+        // that would make every container host unsafe.
+        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx =>
+        {
+            ctx.Cancel = true;      // we handle the exit ourselves
+            RequestShutdown("SIGTERM");
+        });
 
         using var client = new WhiteBitClient(config.Api);
 

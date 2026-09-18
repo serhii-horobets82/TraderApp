@@ -1,18 +1,43 @@
 [Unit]
 Description=TraderApp WhiteBIT bot
-After=network-online.target
-Wants=network-online.target
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+# The WhiteBIT nonce is a millisecond timestamp and the request signature covers
+# it, so starting before NTP has settled produces authentication failures that
+# look like bad credentials. Waiting for time-sync.target avoids that on boot.
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/trader/app
 EnvironmentFile=/etc/trader/env
 ExecStart=/opt/trader/app/TraderApp
+
 Restart=always
 RestartSec=10
-# Positions stay open across restarts; the bot adopts them on boot.
+# Give up if it cannot stay up: 5 starts in 5 minutes means something is
+# genuinely broken, and a bot that crash-loops while holding a position should
+# stop and page rather than flap.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# SIGINT is what the app's Ctrl+C handler listens for: it cancels the loop,
+# cancels resting entry orders and flushes Telegram before exiting. SIGTERM
+# would kill it mid-cycle.
 KillSignal=SIGINT
 TimeoutStopSec=25
+
+# Open positions survive a restart and are re-adopted, but the bot-managed stop
+# is not enforced while the process is down. The exchange-side OTO stop attached
+# at entry is the protection during that window.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trader
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
