@@ -212,7 +212,13 @@ public sealed class ClosedPnl
     [JsonProperty("avgExitPrice")] public decimal AvgExitPrice { get; set; }
     [JsonProperty("closedSize")] public decimal ClosedSize { get; set; }
     [JsonProperty("side")] public string? Side { get; set; }
+    [JsonProperty("openDate")] public long OpenDate { get; set; }
     [JsonProperty("closeDate")] public long CloseDate { get; set; }
+
+    /// <summary>How long the position was actually held.</summary>
+    public TimeSpan Held => OpenDate > 0 && CloseDate > OpenDate
+        ? TimeSpan.FromSeconds(CloseDate - OpenDate)
+        : TimeSpan.Zero;
 }
 
 /// <summary>Response of /api/v4/collateral-account/summary.</summary>

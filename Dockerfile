@@ -4,9 +4,18 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
+# Railway injects service variables as build args only when they are declared
+# here. RAILWAY_GIT_COMMIT_SHA is set by Railway; BUILD_NUMBER you can add as a
+# service variable. Both are optional - Directory.Build.props falls back to a
+# UTC timestamp so every build still gets a distinct, increasing version.
+ARG BUILD_NUMBER=""
+ARG RAILWAY_GIT_COMMIT_SHA=""
+ARG GIT_SHA=""
+ENV BUILD_NUMBER=$BUILD_NUMBER     RAILWAY_GIT_COMMIT_SHA=$RAILWAY_GIT_COMMIT_SHA     GIT_SHA=$GIT_SHA
+
 # NuGet.config pins the source to nuget.org. Without it, restore inherits any
 # private feed configured on the build machine and fails with NU1301.
-COPY NuGet.config ./
+COPY NuGet.config Directory.Build.props ./
 COPY TraderApp/TraderApp.csproj TraderApp/
 RUN dotnet restore TraderApp/TraderApp.csproj
 

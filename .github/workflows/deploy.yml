@@ -22,6 +22,9 @@ jobs:
           dotnet-version: "10.0.x"
 
       - name: Build
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          GIT_SHA: ${{ github.sha }}
         run: dotnet build TraderApp/TraderApp.csproj -c Release --nologo
 
       # Runs nothing today, but the moment a test project is added this gates
@@ -35,6 +38,9 @@ jobs:
           fi
 
       - name: Publish self-contained
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          GIT_SHA: ${{ github.sha }}
         run: >
           dotnet publish TraderApp/TraderApp.csproj
           -c Release

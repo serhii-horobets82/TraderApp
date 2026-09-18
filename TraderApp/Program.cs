@@ -169,7 +169,7 @@ internal static class Program
     private static void PrintBanner(BotConfig c, bool live, bool signalsOnly)
     {
         Console.WriteLine();
-        Console.WriteLine("  TraderApp - WhiteBIT collateral scalper");
+        Console.WriteLine($"  TraderApp {BuildInfo.Display}");
         Console.WriteLine("  ---------------------------------------");
         Console.ForegroundColor = live ? ConsoleColor.Red : ConsoleColor.Green;
         Console.WriteLine(signalsOnly

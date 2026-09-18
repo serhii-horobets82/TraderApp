@@ -1,0 +1,38 @@
+<Project>
+
+  <!--
+    Build identity.
+
+    The build number auto-increments without any state to keep:
+      - CI passes BUILD_NUMBER (GitHub Actions uses github.run_number, which is
+        monotonic per workflow).
+      - Otherwise it falls back to a UTC timestamp, which also only ever goes
+        up, so local and Railway builds still produce distinct versions.
+
+    AssemblyVersion is deliberately left at the plain VersionPrefix: its parts
+    are capped at 65535, and a timestamp does not fit. The build number and
+    commit travel as assembly metadata instead, which has no such limit.
+  -->
+  <PropertyGroup>
+    <Product>TraderApp</Product>
+    <VersionPrefix>1.0.0</VersionPrefix>
+
+    <BuildNumber Condition="'$(BuildNumber)' == ''">$(BUILD_NUMBER)</BuildNumber>
+    <BuildNumber Condition="'$(BuildNumber)' == ''">$([System.DateTime]::UtcNow.ToString('yyMMdd.HHmm'))</BuildNumber>
+
+    <GitSha Condition="'$(GitSha)' == ''">$(GIT_SHA)</GitSha>
+    <GitSha Condition="'$(GitSha)' == ''">$(RAILWAY_GIT_COMMIT_SHA)</GitSha>
+    <GitSha Condition="'$(GitSha)' == ''">local</GitSha>
+
+    <BuildTimeUtc>$([System.DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))</BuildTimeUtc>
+
+    <InformationalVersion>$(VersionPrefix)+$(BuildNumber)</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildNumber" Value="$(BuildNumber)" />
+    <AssemblyMetadata Include="GitSha" Value="$(GitSha)" />
+    <AssemblyMetadata Include="BuildTimeUtc" Value="$(BuildTimeUtc)" />
+  </ItemGroup>
+
+</Project>

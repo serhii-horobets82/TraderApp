@@ -32,12 +32,15 @@ internal sealed class ManagedPosition
 
     /// <summary>Set once a close has been requested, so it is never requested twice.</summary>
     public DateTime? CloseRequestedUtc { get; set; }
+
+    /// <summary>Why the bot decided to close, kept for the close notification.</summary>
+    public string LastExitReason { get; set; } = "";
 }
 
 internal sealed record PendingEntry(long OrderId, string Market, bool IsLong, DateTime PlacedUtc);
 
 /// <summary>A position that has closed but whose realised PnL has not been read back yet.</summary>
-internal sealed record ClosedTrade(long PositionId, string Market, bool IsLong, DateTime ClosedUtc);
+internal sealed record ClosedTrade(long PositionId, string Market, bool IsLong, DateTime ClosedUtc, string ExitReason);
 
 /// <summary>
 /// The auto-trading loop.
@@ -163,8 +166,9 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         _telegram?.Send(
-            $"Started ({(_live ? "LIVE" : "DRY RUN")})\n" +
-            $"Balance {equity:F2} USDT");
+            $"{(_live ? "🟢" : "⚪")} Started · {(_live ? "LIVE" : "DRY RUN")}\n" +
+            $"{BuildInfo.Display}\n" +
+            $"Balance {equity:F2} USDT · {_cfg.Trading.Markets.Count} markets");
 
         // Adopt anything already open so it gets managed rather than ignored.
         var positions = await _client.GetOpenPositionsAsync(null, ct);
@@ -289,6 +293,47 @@ public sealed class AutoTrader : IAsyncDisposable
 
         _telegram.Send(sb.ToString().TrimEnd());
     }
+
+    /// <summary>
+    /// Telegram has no coloured text. Its HTML mode covers bold, italic, code,
+    /// links and spoilers - there is no colour tag. A coloured emoji at the
+    /// start of the line is the only way to get red/green, and it has the bonus
+    /// of showing up in the chat-list preview.
+    /// </summary>
+    private static string FormatClose(ClosedTrade t, ClosedPnl rec, decimal pct, decimal equity)
+    {
+        var win = rec.NetPnl >= 0;
+        var side = t.IsLong ? "long" : "short";
+
+        var held = rec.Held;
+        var heldText = held <= TimeSpan.Zero
+            ? "?"
+            : held.TotalHours >= 1
+                ? $"{(int)held.TotalHours}h{held.Minutes:00}m"
+                : $"{(int)held.TotalMinutes}m";
+
+        var reason = string.IsNullOrWhiteSpace(t.ExitReason) ? "closed" : t.ExitReason;
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"{(win ? "🟢" : "🔴")} {(win ? "WIN" : "LOSS")} · {Short(t.Market)} {side}\n");
+        sb.Append($"P/L      {rec.NetPnl:+0.00;-0.00} USDT ({pct:+0.00;-0.00}%)\n");
+        sb.Append($"Price    {rec.AvgEntryPrice} → {rec.AvgExitPrice}\n");
+        sb.Append($"Held     {heldText} · {reason}\n");
+        sb.Append($"Cost     fee {rec.TotalTradeFee:F3}");
+        if (rec.TotalFunding != 0) sb.Append($" · funding {rec.TotalFunding:F3}");
+        sb.Append($"\nBalance  {equity:F2} USDT");
+        return sb.ToString();
+    }
+
+    /// <summary>Collapses a verbose exit reason to a short label for notifications.</summary>
+    private static string Categorise(string reason) =>
+        reason.StartsWith("stop hit") ? "stop"
+        : reason.StartsWith("target hit") ? "target"
+        : reason.StartsWith("never worked") ? "scratched"
+        : reason.StartsWith("gave back") ? "gave back"
+        : reason.StartsWith("time stop") ? "time stop"
+        : reason.StartsWith("margin call") ? "margin call"
+        : reason;
 
     /// <summary>ETH_USDT -> ETH. The quote currency is the same everywhere and just adds noise.</summary>
     private static string Short(string? market) =>
@@ -541,7 +586,7 @@ public sealed class AutoTrader : IAsyncDisposable
             // The realised result is not in this response; it has to be read
             // back from the closed-PnL endpoint, which lags the close by a
             // moment. Queue it and resolve over the next few ticks.
-            _awaitingPnl.Add(new ClosedTrade(id, m.Market, m.IsLong, DateTime.UtcNow));
+            _awaitingPnl.Add(new ClosedTrade(id, m.Market, m.IsLong, DateTime.UtcNow, m.LastExitReason));
         }
     }
 
@@ -585,10 +630,7 @@ public sealed class AutoTrader : IAsyncDisposable
                       $"({pct:+0.00;-0.00}%), fees {rec.TotalTradeFee:F4}, funding {rec.TotalFunding:F4}");
 
             if (_cfg.Telegram.SendTrades)
-                _telegram?.Send(
-                    $"{(rec.NetPnl >= 0 ? "WIN" : "LOSS")} {Short(t.Market)} {(t.IsLong ? "long" : "short")}\n" +
-                    $"P/L {rec.NetPnl:+0.00;-0.00} USDT  ({pct:+0.00;-0.00}%)\n" +
-                    $"Balance {equity:F2} USDT");
+                _telegram?.Send(FormatClose(t, rec, pct, equity));
 
             _awaitingPnl.Remove(t);
         }
@@ -722,6 +764,11 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         Log.Trade($"{pos.Market} #{pos.PositionId}: closing - {exitReason} | uPnL {floating:F4}");
+
+        // Stash why, so the close notification can say more than "closed". The
+        // exchange's closed-PnL record has the prices and timing but not the
+        // reason - that only exists here.
+        m.LastExitReason = Categorise(exitReason);
 
         if (!_live)
         {
