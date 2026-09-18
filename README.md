@@ -152,6 +152,7 @@ The settings worth knowing:
 | Key | Default | Meaning |
 |---|---|---|
 | `Trading.DryRun` | `false` | `true` or `--dry-run` logs decisions and sends no orders |
+| `Trading.Markets` | `SOL, AAVE, XRP, SUI` | Collateral pairs with enough 15m ATR to clear ~0.2% fees; BTC/ETH usually too quiet |
 | `Trading.EntryInterval` | `15m` | Set by fee economics - see below |
 | `Trading.RegimeInterval` | `4h` | Higher-timeframe filter |
 | `Trading.Leverage` | `3` | Account-wide, set at startup |
@@ -194,6 +195,13 @@ to leave any net edge. Measured ATR%:
 | BTC_USDT | 0.038 | 0.101 | 0.114% ✗ | 0.303% ✓ |
 
 On 5m several majors still fail or barely clear the 0.30% fee+edge floor; on 15m all eight can. The 3.0× target vs 1.4× stop is what leaves a usable payoff after a 0.2% round trip — 1.6× ATR did not.
+
+**Live market set.** The bot scans `SOL_USDT`, `AAVE_USDT`, `XRP_USDT`, and
+`SUI_USDT` — the liquid names that clear fees with room to spare. `MaxConcurrentPositions`
+is still 1 and `MaxSameDirectionPositions` is 1, so extra pairs mainly improve
+setup selection, not stacked exposure. BTC/ETH stay out: their 15m ATR is usually
+below `MinAtrPct`. DOT works on volatility but is left off by default as the
+wildest of the measured set.
 
 **The honest framing:** at 0.1%/0.1%, true scalping is not viable on WhiteBIT.
 A 0.2% round trip against a 0.13% average 5m move loses regardless of signal
