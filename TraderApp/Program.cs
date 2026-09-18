@@ -84,7 +84,6 @@ internal static class Program
         {
             stopReason = source;
             Log.Warn($"shutdown requested ({source}) - finishing the current cycle");
-            telegram.Send($"TraderApp stopping ({source}). Open positions keep their exchange stop.");
             if (!cts.IsCancellationRequested) cts.Cancel();
         }
 
@@ -130,9 +129,23 @@ internal static class Program
         }
         finally
         {
-            await telegram.SendNowAsync($"TraderApp is down ({stopReason}).");
-            await telegram.SignalWatchdogDownAsync();
-            Log.Info("stopped");
+            // Railway sends SIGTERM to the outgoing replica on every deploy.
+            // That is not an outage — the new replica already sent Started.
+            // Alert Telegram and fail the watchdog only when this process
+            // died unexpectedly, so a missed ping still covers hard kills.
+            var planned = stopReason is "Railway/SIGTERM" or "Ctrl+C" or "finished";
+            if (!planned)
+            {
+                await telegram.SendNowAsync($"TraderApp is down ({stopReason}).");
+                await telegram.SignalWatchdogDownAsync();
+            }
+            else if (stopReason == "Ctrl+C")
+            {
+                await telegram.SendNowAsync(
+                    "TraderApp stopped (Ctrl+C). Open positions keep their exchange stop.");
+            }
+
+            Log.Info($"stopped ({stopReason})");
             Log.SetNotifier(null);
             Log.Close();
         }

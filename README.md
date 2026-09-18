@@ -219,10 +219,11 @@ in `appsettings.json` as `Telegram.ChatId`, and set `Telegram.Enabled: true`.
 | `HeartbeatMinutes` | `60` | Periodic balance and open positions; `0` disables |
 | `WatchdogPingUrl` | empty | healthchecks.io ping URL — alerts Telegram if pings stop |
 
-**When the bot is down.** Railway sends SIGTERM on deploy/stop; the process
-then texts `TraderApp is down (Railway/SIGTERM)`. A crash that still hits
-`catch` does the same. An OOM or hard kill **cannot** send from the dead
-process — that is what the watchdog is for.
+**When the bot is down.** A Railway deploy SIGTERMs the old replica; that is
+planned, so it does **not** text “is down” (you will already have `Started`
+from the new one). A crash that still hits `catch` does text `TraderApp is
+down`. An OOM or hard kill **cannot** send from the dead process — that is
+what the watchdog is for.
 
 1. Create a check at [healthchecks.io](https://healthchecks.io) (free), period 5 minutes, grace 5 minutes.
 2. Integrations → Telegram, same chat as the bot.
