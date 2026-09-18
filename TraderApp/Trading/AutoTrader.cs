@@ -269,7 +269,7 @@ public sealed class AutoTrader : IAsyncDisposable
         //    (real trigger) in the same tick.
         await ConsiderEntriesAsync(equity, openNotional, positions, ct);
 
-        if (_tick % 20 == 1)
+        if (ShouldStatusLog())
             Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | " +
                      $"pending {_pending.Count} | trades today {_risk.EntriesToday}/{_cfg.Risk.MaxTradesPerDay} | " +
                      $"loss streak {_risk.ConsecutiveLosses}");
@@ -378,7 +378,7 @@ public sealed class AutoTrader : IAsyncDisposable
         var slots = _cfg.Risk.MaxConcurrentPositions - positions.Count - _pending.Count;
         if (slots <= 0)
         {
-            if (_tick % 20 == 1)
+            if (ShouldStatusLog())
             {
                 foreach (var market in _cfg.Trading.Markets)
                     Log.Info($"{market}: no entry - {positions.Count + _pending.Count} open/pending, limit {_cfg.Risk.MaxConcurrentPositions}");
@@ -393,7 +393,7 @@ public sealed class AutoTrader : IAsyncDisposable
             if (ct.IsCancellationRequested) break;
             if (!_risk.CanOpenNewPosition(market, positions, out var blockReason, _pending.Count, reserved))
             {
-                if (_tick % 20 == 1) Log.Info($"{market}: no entry - {blockReason}");
+                if (ShouldStatusLog()) Log.Info($"{market}: no entry - {blockReason}");
                 continue;
             }
 
@@ -467,7 +467,7 @@ public sealed class AutoTrader : IAsyncDisposable
 
         if (!signal.IsActionable)
         {
-            if (_tick % 20 == 1) Log.Info($"{market}: {signal.Explain()}");
+            if (ShouldStatusLog()) Log.Info($"{market}: {signal.Explain()}");
             return null;
         }
 
@@ -691,7 +691,7 @@ public sealed class AutoTrader : IAsyncDisposable
         // rather than out of the list.
         if (pos.AbsAmount <= 0 || pos.BasePrice <= 0)
         {
-            if (_tick % 20 == 1)
+            if (ShouldStatusLog())
                 Log.Info($"{pos.Market} #{pos.PositionId}: not filled yet (size {pos.Amount}, base {pos.BasePrice}) - nothing to manage");
             return;
         }
@@ -800,7 +800,7 @@ public sealed class AutoTrader : IAsyncDisposable
 
         if (exitReason is null)
         {
-            if (_tick % 10 == 1)
+            if (ShouldStatusLog())
                 Log.Info($"{pos.Market} #{pos.PositionId} {(m.IsLong ? "LONG" : "SHORT")} " +
                          $"{pos.AbsAmount} @ {pos.BasePrice} | mark {mark} | uPnL {floating:F4} " +
                          $"({rMultiple:F2}R) | stop {m.StopPrice} | tp {m.TakeProfitPrice}");
@@ -885,6 +885,12 @@ public sealed class AutoTrader : IAsyncDisposable
         Log.Trade($"{pos.Market}: adopted #{pos.PositionId} {(isLong ? "LONG" : "SHORT")} " +
                   $"entry {entry} stop {m.StopPrice} tp {m.TakeProfitPrice} (ATR {atr})");
         return m;
+    }
+
+    private bool ShouldStatusLog()
+    {
+        var every = Math.Max(1, _cfg.Trading.StatusLogEveryTicks);
+        return _tick % every == 1;
     }
 
     /// <summary>

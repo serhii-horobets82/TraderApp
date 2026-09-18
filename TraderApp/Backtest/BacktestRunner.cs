@@ -190,6 +190,7 @@ public static class BacktestRunner
             MinTriggerWeight = c.Signals.MinTriggerWeight, MinAgreeingWeight = c.Signals.MinAgreeingWeight,
             MinVolumeRatio = c.Signals.MinVolumeRatio,
             MaxTrendRsiLong = c.Signals.MaxTrendRsiLong, MinTrendRsiShort = c.Signals.MinTrendRsiShort,
+            RequireMacdAlign = c.Signals.RequireMacdAlign,
             AdxTrendThreshold = c.Signals.AdxTrendThreshold,
             RsiOversold = c.Signals.RsiOversold, RsiOverbought = c.Signals.RsiOverbought,
             RsiExtremeHigh = c.Signals.RsiExtremeHigh, RsiExtremeLow = c.Signals.RsiExtremeLow,

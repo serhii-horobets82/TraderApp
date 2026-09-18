@@ -209,6 +209,8 @@ internal static class Program
         Console.WriteLine($"  Trade budget  : {c.Risk.MaxTradesPerHour}/hour, {c.Risk.MaxTradesPerDay}/day UTC");
         Console.WriteLine($"  Loss streak   : {c.Risk.MaxConsecutiveLosses} → {(c.Risk.HaltOnConsecutiveLosses ? "HALT" : $"cooldown {c.Risk.LossCooldownMinutes}m")}");
         Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
+        Console.WriteLine($"  Loop          : every {c.Trading.LoopIntervalMs}ms, status every {c.Trading.StatusLogEveryTicks} ticks");
+        Console.WriteLine($"  MACD align    : {(c.Signals.RequireMacdAlign ? "required" : "optional")}");
         Console.WriteLine("  Ctrl+C to stop.");
         Console.WriteLine();
     }
