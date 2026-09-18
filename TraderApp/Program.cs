@@ -66,11 +66,25 @@ internal static class Program
         PrintBanner(config, live, signalsOnly);
 
         using var cts = new CancellationTokenSource();
+        using var client = new WhiteBitClient(config.Api);
+        await using var telegram = new TelegramNotifier(config.Telegram);
+        if (telegram.IsConfigured)
+        {
+            Log.SetNotifier(telegram.SendFromLog);
+            Log.Info($"Telegram notifications on (chat {config.Telegram.ChatId})");
+        }
+        else if (config.Telegram.Enabled)
+        {
+            Log.Warn("Telegram is enabled but has no ChatId - run with --telegram-test to find it");
+        }
+
+        var stopReason = "finished";
 
         void RequestShutdown(string source)
         {
+            stopReason = source;
             Log.Warn($"shutdown requested ({source}) - finishing the current cycle");
-            // ReSharper disable once AccessToDisposedClosure
+            telegram.Send($"TraderApp stopping ({source}). Open positions keep their exchange stop.");
             if (!cts.IsCancellationRequested) cts.Cancel();
         }
 
@@ -88,22 +102,9 @@ internal static class Program
         // that would make every container host unsafe.
         using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx =>
         {
-            ctx.Cancel = true;      // we handle the exit ourselves
-            RequestShutdown("SIGTERM");
+            ctx.Cancel = true;
+            RequestShutdown("Railway/SIGTERM");
         });
-
-        using var client = new WhiteBitClient(config.Api);
-
-        await using var telegram = new TelegramNotifier(config.Telegram);
-        if (telegram.IsConfigured)
-        {
-            Log.SetNotifier(telegram.SendFromLog);
-            Log.Info($"Telegram notifications on (chat {config.Telegram.ChatId})");
-        }
-        else if (config.Telegram.Enabled)
-        {
-            Log.Warn("Telegram is enabled but has no ChatId - run with --telegram-test to find it");
-        }
 
         try
         {
@@ -119,16 +120,20 @@ internal static class Program
         }
         catch (InvalidOperationException ex)
         {
+            stopReason = ex.Message;
             Log.Error(ex.Message);
             return 3;
         }
         catch (Exception ex)
         {
+            stopReason = $"crash: {ex.Message}";
             Log.Error($"fatal: {ex}");
             return 2;
         }
         finally
         {
+            await telegram.SendNowAsync($"TraderApp is down ({stopReason}).");
+            await telegram.SignalWatchdogDownAsync();
             Log.Info("stopped");
             Log.SetNotifier(null);
             Log.Close();
@@ -152,6 +157,8 @@ internal static class Program
         cfg.Api.Secret = FirstNonEmpty(cfg.Api.Secret, Environment.GetEnvironmentVariable("WHITEBIT_API_SECRET"));
         cfg.Telegram.BotToken = FirstNonEmpty(cfg.Telegram.BotToken, Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
         cfg.Telegram.ChatId = FirstNonEmpty(cfg.Telegram.ChatId, Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID"));
+        cfg.Telegram.WatchdogPingUrl = FirstNonEmpty(cfg.Telegram.WatchdogPingUrl,
+            Environment.GetEnvironmentVariable("HEALTHCHECK_PING_URL"));
 
         // Credentials pasted through a shell or a prompt routinely pick up
         // trailing whitespace, which silently breaks HMAC signing.

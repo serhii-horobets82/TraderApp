@@ -71,6 +71,7 @@ public sealed class AutoTrader : IAsyncDisposable
     private readonly bool _live;
     private readonly Notifications.TelegramNotifier? _telegram;
     private DateTime _lastHeartbeatUtc = DateTime.UtcNow;
+    private DateTime _lastWatchdogUtc = DateTime.MinValue;
     private readonly Dictionary<string, DateTime> _lastSizingRejectLog = new(StringComparer.OrdinalIgnoreCase);
     private int _tick;
 
@@ -262,6 +263,7 @@ public sealed class AutoTrader : IAsyncDisposable
             Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | pending {_pending.Count}");
 
         MaybeSendHeartbeat(equity, positions, openNotional);
+        MaybePingWatchdog();
     }
 
     /// <summary>
@@ -292,6 +294,19 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         _telegram.Send(sb.ToString().TrimEnd());
+    }
+
+    private void MaybePingWatchdog()
+    {
+        if (_telegram is null || string.IsNullOrWhiteSpace(_cfg.Telegram.WatchdogPingUrl)) return;
+        var every = _cfg.Telegram.WatchdogPingMinutes > 0
+            ? _cfg.Telegram.WatchdogPingMinutes
+            : Math.Max(1, _cfg.Telegram.HeartbeatMinutes);
+        if (_lastWatchdogUtc != DateTime.MinValue &&
+            DateTime.UtcNow - _lastWatchdogUtc < TimeSpan.FromMinutes(every))
+            return;
+        _lastWatchdogUtc = DateTime.UtcNow;
+        _telegram.PingWatchdog();
     }
 
     /// <summary>

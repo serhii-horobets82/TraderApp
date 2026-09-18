@@ -219,6 +219,19 @@ in `appsettings.json` as `Telegram.ChatId`, and set `Telegram.Enabled: true`.
 | `SendErrors` | `true` | API and loop failures |
 | `Verbose` | `false` | Every raw log line - signal breakdowns, order ids, stop moves |
 | `HeartbeatMinutes` | `60` | Periodic balance and open positions; `0` disables |
+| `WatchdogPingUrl` | empty | healthchecks.io ping URL — alerts Telegram if pings stop |
+
+**When the bot is down.** Railway sends SIGTERM on deploy/stop; the process
+then texts `TraderApp is down (Railway/SIGTERM)`. A crash that still hits
+`catch` does the same. An OOM or hard kill **cannot** send from the dead
+process — that is what the watchdog is for.
+
+1. Create a check at [healthchecks.io](https://healthchecks.io) (free), period 5 minutes, grace 5 minutes.
+2. Integrations → Telegram, same chat as the bot.
+3. Railway variable `HEALTHCHECK_PING_URL` = the ping URL (not the fail URL).
+
+The bot GETs that URL every `WatchdogPingMinutes` (default 5). If Railway dies
+without SIGTERM, healthchecks.io notices the missed ping and Telegram fires.
 
 Messages are deliberately short - the result, not the reasoning:
 

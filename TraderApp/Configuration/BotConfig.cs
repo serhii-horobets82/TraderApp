@@ -361,6 +361,16 @@ public sealed class TelegramConfig
     public int HeartbeatMinutes { get; set; } = 60;
 
     /// <summary>
+    /// GET this URL on a timer (healthchecks.io ping URL). If the process dies
+    /// without a SIGTERM, pings stop and the watchdog sends Telegram — the bot
+    /// itself cannot. Empty disables. HEALTHCHECK_PING_URL also works.
+    /// </summary>
+    public string WatchdogPingUrl { get; set; } = "";
+
+    /// <summary>How often to ping the watchdog. 0 uses HeartbeatMinutes (min 1).</summary>
+    public int WatchdogPingMinutes { get; set; } = 5;
+
+    /// <summary>
     /// Minimum gap between outbound messages. Telegram throttles aggressively per
     /// chat; queued messages are batched into one send rather than dropped.
     /// </summary>

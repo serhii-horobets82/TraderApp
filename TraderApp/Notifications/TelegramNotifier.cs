@@ -54,6 +54,60 @@ public sealed class TelegramNotifier : IAsyncDisposable
         if (!_queue.Writer.TryWrite(message)) Interlocked.Increment(ref _dropped);
     }
 
+    /// <summary>
+    /// Send immediately and wait for Telegram to accept it. Used on shutdown and
+    /// fatal errors: the queued worker may already be cancelled, and a queued
+    /// "bot down" that never leaves the process is useless.
+    /// </summary>
+    public async Task SendNowAsync(string message, TimeSpan? timeout = null)
+    {
+        if (!IsConfigured || string.IsNullOrWhiteSpace(message)) return;
+        try
+        {
+            using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(8));
+            await SendBatchAsync(message, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            Log.Diag($"[telegram] urgent send failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Dead-man's switch ping (healthchecks.io or any URL that expects GET).
+    /// Fire-and-forget so a hung watchdog cannot stall the trading loop.
+    /// </summary>
+    public void PingWatchdog()
+    {
+        var url = _cfg.WatchdogPingUrl;
+        if (string.IsNullOrWhiteSpace(url)) return;
+        _ = PingWatchdogAsync(url, fail: false);
+    }
+
+    /// <summary>Tell the watchdog this process is going away, so it alerts now instead of after the grace period.</summary>
+    public Task SignalWatchdogDownAsync()
+    {
+        var url = _cfg.WatchdogPingUrl;
+        if (string.IsNullOrWhiteSpace(url)) return Task.CompletedTask;
+        var failUrl = url.TrimEnd('/') + "/fail";
+        return PingWatchdogAsync(failUrl, fail: true);
+    }
+
+    private async Task PingWatchdogAsync(string url, bool fail)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var resp = await _http.GetAsync(url, cts.Token);
+            if (!resp.IsSuccessStatusCode)
+                Log.Diag($"[watchdog] ping {(fail ? "fail" : "ok")} HTTP {(int)resp.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            Log.Diag($"[watchdog] ping failed: {ex.Message}");
+        }
+    }
+
     /// <summary>Routes a log line to Telegram if its level is enabled.</summary>
     public void SendFromLog(string level, string message)
     {
