@@ -91,6 +91,9 @@ pullbacks in the trend; below it, band reversion.
 
 ## How it keeps the risk bounded
 
+**Hard risk defaults** are tuned for small, stable sessions — fewer trades,
+smaller size, and early cutouts — not for maximum activity.
+
 **Sizing is derived from the stop, not chosen.** Quantity is set so that being
 stopped out costs exactly `RiskPerTradePct` (0.25%) of collateral equity, then
 clamped by the per-position and total notional ceilings and the market's own
@@ -117,12 +120,27 @@ It is still a limit order, so slippage is capped at the spread, and the 8 bps
 `MaxSpreadBps` veto caps that at roughly 0.08% against targets of ~0.30-2.0%.
 Set `PostOnlyEntries: true` to go back to passive resting.
 
-Cooldowns and the trades-per-hour budget are consumed when an entry **fills**,
-not when it is placed - an order that times out unfilled costs nothing.
+Cooldowns and the trades-per-hour / trades-per-day budgets are consumed when an
+entry **fills**, not when it is placed - an order that times out unfilled costs
+nothing.
 
-**Circuit breakers:** session drawdown cutout (−3% equity → flatten and halt),
-margin-call flatten, max concurrent positions, max total notional, per-market
-cooldown, max trades/hour, and a consecutive-loss cooldown.
+**Circuit breakers:**
+
+| Rule | Default | Effect |
+|---|---|---|
+| Session drawdown | −2% from start equity | Flatten + halt |
+| Peak drawdown | −2% from session peak | Flatten + halt (protects winners from give-back) |
+| Daily profit lock | +1.5% session | Halt — lock a green day |
+| Consecutive losses | 3 | Hard halt (`HaltOnConsecutiveLosses`) |
+| Max concurrent | 1 | One position at a time |
+| Same-direction cap | 1 | No stacked longs/shorts across alts |
+| Per-market cooldown | 600s | No re-entry churn |
+| Trade budget | 4/hour, 10/day UTC | Caps overtrading |
+| Margin call | on | Flatten + halt |
+
+Set `HaltOnConsecutiveLosses` to `false` if you prefer a cooldown
+(`LossCooldownMinutes`) instead of ending the session. Set
+`MaxDailyProfitPct` / `MaxPeakDrawdownPct` to `0` to disable those locks.
 
 ---
 
@@ -141,8 +159,12 @@ The settings worth knowing:
 | `Trading.TakeProfitAtrMult` | `3.0` | Target; sized so 0.1%/0.1% fees leave net edge |
 | `Trading.PostOnlyEntries` | `false` | `false` crosses the spread to fill now; `true` rests at the near touch and may not fill |
 | `Risk.RiskPerTradePct` | `0.25` | Percent of equity lost if the stop is hit |
-| `Risk.MaxDailyDrawdownPct` | `3` | Session cutout |
-| `Risk.MaxConcurrentPositions` | `2` | |
+| `Risk.MaxDailyDrawdownPct` | `2` | Session-start equity cutout |
+| `Risk.MaxPeakDrawdownPct` | `2` | Drawdown from session peak (0 = off) |
+| `Risk.MaxDailyProfitPct` | `1.5` | Lock a green day and halt (0 = off) |
+| `Risk.MaxConcurrentPositions` | `1` | One position at a time |
+| `Risk.MaxTradesPerHour` / `MaxTradesPerDay` | `4` / `10` | Overtrading budget |
+| `Risk.HaltOnConsecutiveLosses` | `true` | 3 losses → session halt (else cooldown) |
 | `Signals.MinScore` | `0.62` | Raise for fewer, higher-conviction trades |
 
 ### Why the entry timeframe is 15m

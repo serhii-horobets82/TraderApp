@@ -29,8 +29,18 @@ public sealed class BotConfig
             errors.Add("Risk.RiskPerTradePct must be in (0, 2]. More than 2% of equity per trade is not safe scalping.");
         if (Risk.MaxDailyDrawdownPct is <= 0 or > 20m)
             errors.Add("Risk.MaxDailyDrawdownPct must be in (0, 20].");
+        if (Risk.MaxPeakDrawdownPct is < 0 or > 20m)
+            errors.Add("Risk.MaxPeakDrawdownPct must be in [0, 20]. 0 disables the peak cutout.");
+        if (Risk.MaxDailyProfitPct is < 0 or > 50m)
+            errors.Add("Risk.MaxDailyProfitPct must be in [0, 50]. 0 disables the profit lock.");
         if (Risk.MaxConcurrentPositions is < 1 or > 10)
             errors.Add("Risk.MaxConcurrentPositions must be between 1 and 10.");
+        if (Risk.MaxTradesPerHour is < 1 or > 60)
+            errors.Add("Risk.MaxTradesPerHour must be between 1 and 60.");
+        if (Risk.MaxTradesPerDay is < 1 or > 200)
+            errors.Add("Risk.MaxTradesPerDay must be between 1 and 200.");
+        if (Risk.MaxConsecutiveLosses is < 1 or > 20)
+            errors.Add("Risk.MaxConsecutiveLosses must be between 1 and 20.");
         if (Signals.MinScore is < 0.3 or > 1.0)
             errors.Add("Signals.MinScore must be in [0.3, 1.0].");
         if (Trading.TakeProfitAtrMult <= Trading.StopLossAtrMult * 0.8m)
@@ -266,15 +276,15 @@ public sealed class SignalConfig
 public sealed class RiskConfig
 {
     /// <summary>Equity fraction risked per trade, in percent, measured to the bot stop.</summary>
-    public decimal RiskPerTradePct { get; set; } = 0.40m;
+    public decimal RiskPerTradePct { get; set; } = 0.25m;
 
     /// <summary>Hard ceiling on position notional, in quote currency.</summary>
-    public decimal MaxNotionalPerPositionUsd { get; set; } = 200m;
+    public decimal MaxNotionalPerPositionUsd { get; set; } = 40m;
 
     /// <summary>Hard ceiling on the sum of all open position notionals.</summary>
-    public decimal MaxTotalNotionalUsd { get; set; } = 600m;
+    public decimal MaxTotalNotionalUsd { get; set; } = 80m;
 
-    public int MaxConcurrentPositions { get; set; } = 2;
+    public int MaxConcurrentPositions { get; set; } = 1;
 
     /// <summary>Cap on longs or shorts at once. Crypto alts move together; two longs is one bet.</summary>
     public int MaxSameDirectionPositions { get; set; } = 1;
@@ -283,19 +293,40 @@ public sealed class RiskConfig
     public bool OnePositionPerMarket { get; set; } = true;
 
     /// <summary>Session halts (and flattens) when equity falls this far below the session starting equity.</summary>
-    public decimal MaxDailyDrawdownPct { get; set; } = 3m;
+    public decimal MaxDailyDrawdownPct { get; set; } = 2m;
+
+    /// <summary>
+    /// Halt when equity falls this far below the session peak (0 disables).
+    /// Catches give-back after a green streak that session-start drawdown misses.
+    /// </summary>
+    public decimal MaxPeakDrawdownPct { get; set; } = 2m;
+
+    /// <summary>
+    /// Halt when session equity profit reaches this percent of starting equity
+    /// (0 disables). Locks a small green day instead of giving it back.
+    /// </summary>
+    public decimal MaxDailyProfitPct { get; set; } = 1.5m;
 
     /// <summary>Stop opening new positions after this many losses in a row.</summary>
     public int MaxConsecutiveLosses { get; set; } = 3;
 
-    /// <summary>Cooldown after the consecutive-loss limit is hit, in minutes.</summary>
-    public int LossCooldownMinutes { get; set; } = 30;
+    /// <summary>
+    /// When true, hitting MaxConsecutiveLosses flattens the session (halt).
+    /// When false, only a cooldown of LossCooldownMinutes is applied.
+    /// </summary>
+    public bool HaltOnConsecutiveLosses { get; set; } = true;
+
+    /// <summary>Cooldown after the consecutive-loss limit is hit, in minutes (used when HaltOnConsecutiveLosses is false).</summary>
+    public int LossCooldownMinutes { get; set; } = 60;
 
     /// <summary>Minimum wait between two entries on the same market, in seconds.</summary>
-    public int PerMarketCooldownSeconds { get; set; } = 300;
+    public int PerMarketCooldownSeconds { get; set; } = 600;
 
     /// <summary>Maximum entries per hour across all markets.</summary>
-    public int MaxTradesPerHour { get; set; } = 10;
+    public int MaxTradesPerHour { get; set; } = 4;
+
+    /// <summary>Maximum entries per UTC day across all markets.</summary>
+    public int MaxTradesPerDay { get; set; } = 10;
 
     /// <summary>
     /// Fallback round-trip fee, in percent of notional, used only when the
@@ -305,7 +336,7 @@ public sealed class RiskConfig
     public decimal RoundTripFeePct { get; set; } = 0.2m;
 
     /// <summary>Required net profit after fees at the take-profit level, in percent of notional.</summary>
-    public decimal MinNetEdgePct { get; set; } = 0.12m;
+    public decimal MinNetEdgePct { get; set; } = 0.15m;
 
     /// <summary>Refuse a setup whose stop is tighter than this percent of price.</summary>
     public decimal MinStopPct { get; set; } = 0.45m;

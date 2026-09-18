@@ -204,7 +204,10 @@ internal static class Program
         Console.WriteLine($"  Stop / target : {c.Trading.StopLossAtrMult}x ATR / {c.Trading.TakeProfitAtrMult}x ATR");
         Console.WriteLine($"  Hard stop     : {c.Trading.HardStopMultiplier}x bot stop, attached to the entry order");
         Console.WriteLine($"  Max positions : {c.Risk.MaxConcurrentPositions} (max {c.Risk.MaxTotalNotionalUsd} notional)");
-        Console.WriteLine($"  Daily cutout  : -{c.Risk.MaxDailyDrawdownPct}% equity");
+        Console.WriteLine($"  Daily cutout  : -{c.Risk.MaxDailyDrawdownPct}% session / -{c.Risk.MaxPeakDrawdownPct}% from peak");
+        Console.WriteLine($"  Profit lock   : +{c.Risk.MaxDailyProfitPct}% session (0 = off)");
+        Console.WriteLine($"  Trade budget  : {c.Risk.MaxTradesPerHour}/hour, {c.Risk.MaxTradesPerDay}/day UTC");
+        Console.WriteLine($"  Loss streak   : {c.Risk.MaxConsecutiveLosses} → {(c.Risk.HaltOnConsecutiveLosses ? "HALT" : $"cooldown {c.Risk.LossCooldownMinutes}m")}");
         Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
         Console.WriteLine("  Ctrl+C to stop.");
         Console.WriteLine();

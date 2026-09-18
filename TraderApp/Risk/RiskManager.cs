@@ -20,10 +20,14 @@ public sealed class RiskManager
     private readonly Queue<DateTime> _entryTimestamps = new();
 
     private int _consecutiveLosses;
+    private int _entriesToday;
+    private DateOnly _entriesDay;
     private DateTime? _cooldownUntil;
 
     public decimal SessionStartEquity { get; private set; }
     public decimal PeakEquity { get; private set; }
+    public int ConsecutiveLosses => _consecutiveLosses;
+    public int EntriesToday => _entriesToday;
     public bool Halted { get; private set; }
     public string HaltReason { get; private set; } = "";
 
@@ -31,6 +35,7 @@ public sealed class RiskManager
     {
         _cfg = cfg;
         _trading = trading;
+        _entriesDay = DateOnly.FromDateTime(DateTime.UtcNow);
     }
 
     public void InitialiseEquity(decimal equity)
@@ -57,11 +62,35 @@ public sealed class RiskManager
 
         if (SessionStartEquity > 0)
         {
-            var ddPct = (SessionStartEquity - equity) / SessionStartEquity * 100m;
-            if (ddPct >= _cfg.MaxDailyDrawdownPct)
+            var sessionDdPct = (SessionStartEquity - equity) / SessionStartEquity * 100m;
+            if (sessionDdPct >= _cfg.MaxDailyDrawdownPct)
             {
-                reason = $"session drawdown {ddPct:F2}% reached the {_cfg.MaxDailyDrawdownPct}% limit " +
+                reason = $"session drawdown {sessionDdPct:F2}% reached the {_cfg.MaxDailyDrawdownPct}% limit " +
                          $"(equity {equity:F2} vs start {SessionStartEquity:F2})";
+                Halt(reason);
+                return true;
+            }
+
+            if (_cfg.MaxDailyProfitPct > 0)
+            {
+                var profitPct = (equity - SessionStartEquity) / SessionStartEquity * 100m;
+                if (profitPct >= _cfg.MaxDailyProfitPct)
+                {
+                    reason = $"daily profit lock hit {profitPct:F2}% (cap {_cfg.MaxDailyProfitPct}%) — " +
+                             $"locking the green day at equity {equity:F2}";
+                    Halt(reason);
+                    return true;
+                }
+            }
+        }
+
+        if (_cfg.MaxPeakDrawdownPct > 0 && PeakEquity > 0)
+        {
+            var peakDdPct = (PeakEquity - equity) / PeakEquity * 100m;
+            if (peakDdPct >= _cfg.MaxPeakDrawdownPct)
+            {
+                reason = $"peak drawdown {peakDdPct:F2}% reached the {_cfg.MaxPeakDrawdownPct}% limit " +
+                         $"(equity {equity:F2} vs peak {PeakEquity:F2})";
                 Halt(reason);
                 return true;
             }
@@ -93,17 +122,27 @@ public sealed class RiskManager
         }
 
         _consecutiveLosses++;
-        if (_consecutiveLosses >= _cfg.MaxConsecutiveLosses)
+        if (_consecutiveLosses < _cfg.MaxConsecutiveLosses)
+            return;
+
+        if (_cfg.HaltOnConsecutiveLosses)
         {
-            _cooldownUntil = DateTime.UtcNow.AddMinutes(_cfg.LossCooldownMinutes);
-            _consecutiveLosses = 0;
+            Halt($"{_consecutiveLosses} consecutive losses — hard session halt " +
+                 $"(limit {_cfg.MaxConsecutiveLosses})");
+            return;
         }
+
+        _cooldownUntil = DateTime.UtcNow.AddMinutes(_cfg.LossCooldownMinutes);
+        _consecutiveLosses = 0;
     }
 
     public void RecordEntry(string market)
     {
-        _lastEntryPerMarket[market] = DateTime.UtcNow;
-        _entryTimestamps.Enqueue(DateTime.UtcNow);
+        var now = DateTime.UtcNow;
+        RollDayIfNeeded(now);
+        _lastEntryPerMarket[market] = now;
+        _entryTimestamps.Enqueue(now);
+        _entriesToday++;
     }
 
     /// <summary>Gate checks that do not depend on sizing.</summary>
@@ -115,10 +154,12 @@ public sealed class RiskManager
         IReadOnlyCollection<string>? reservedMarkets = null)
     {
         reason = "";
+        var now = DateTime.UtcNow;
+        RollDayIfNeeded(now);
 
         if (Halted) { reason = $"halted: {HaltReason}"; return false; }
 
-        if (_cooldownUntil is { } until && DateTime.UtcNow < until)
+        if (_cooldownUntil is { } until && now < until)
         {
             reason = $"loss cooldown until {until:HH:mm:ss} UTC";
             return false;
@@ -142,7 +183,7 @@ public sealed class RiskManager
 
         if (_lastEntryPerMarket.TryGetValue(market, out var last))
         {
-            var wait = TimeSpan.FromSeconds(_cfg.PerMarketCooldownSeconds) - (DateTime.UtcNow - last);
+            var wait = TimeSpan.FromSeconds(_cfg.PerMarketCooldownSeconds) - (now - last);
             if (wait > TimeSpan.Zero)
             {
                 reason = $"{market} cooldown, {wait.TotalSeconds:F0}s left";
@@ -150,11 +191,18 @@ public sealed class RiskManager
             }
         }
 
-        var cutoff = DateTime.UtcNow.AddHours(-1);
-        while (_entryTimestamps.Count > 0 && _entryTimestamps.Peek() < cutoff) _entryTimestamps.Dequeue();
+        var hourCutoff = now.AddHours(-1);
+        while (_entryTimestamps.Count > 0 && _entryTimestamps.Peek() < hourCutoff)
+            _entryTimestamps.Dequeue();
         if (_entryTimestamps.Count >= _cfg.MaxTradesPerHour)
         {
             reason = $"{_entryTimestamps.Count} entries in the last hour, limit {_cfg.MaxTradesPerHour}";
+            return false;
+        }
+
+        if (_entriesToday >= _cfg.MaxTradesPerDay)
+        {
+            reason = $"{_entriesToday} entries today (UTC), limit {_cfg.MaxTradesPerDay}";
             return false;
         }
 
@@ -240,5 +288,13 @@ public sealed class RiskManager
             return new SizingResult(false, 0, 0, 0, 0, "protective prices snapped to zero or below");
 
         return new SizingResult(true, amount, stop, take, hardStop, "ok");
+    }
+
+    private void RollDayIfNeeded(DateTime utcNow)
+    {
+        var today = DateOnly.FromDateTime(utcNow);
+        if (today == _entriesDay) return;
+        _entriesDay = today;
+        _entriesToday = 0;
     }
 }

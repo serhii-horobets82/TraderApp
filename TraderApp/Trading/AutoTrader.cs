@@ -243,6 +243,16 @@ public sealed class AutoTrader : IAsyncDisposable
 
         ReconcileManaged(positions);
         await ResolveClosedTradesAsync(equity, ct);
+
+        // Consecutive-loss halt is set inside ResolveClosedTradesAsync; flatten
+        // immediately rather than leaving orphans when the outer loop exits.
+        if (_risk.Halted)
+        {
+            Log.Risk($"HALTED mid-tick - {_risk.HaltReason}");
+            await FlattenAllAsync(positions, ct);
+            return;
+        }
+
         await ReconcilePendingAsync(ct);
 
         var openNotional = positions.Sum(p => p.AbsAmount * p.BasePrice);
@@ -260,7 +270,9 @@ public sealed class AutoTrader : IAsyncDisposable
         await ConsiderEntriesAsync(equity, openNotional, positions, ct);
 
         if (_tick % 20 == 1)
-            Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | pending {_pending.Count}");
+            Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | " +
+                     $"pending {_pending.Count} | trades today {_risk.EntriesToday}/{_cfg.Risk.MaxTradesPerDay} | " +
+                     $"loss streak {_risk.ConsecutiveLosses}");
 
         MaybeSendHeartbeat(equity, positions, openNotional);
         MaybePingWatchdog();
