@@ -202,6 +202,108 @@ public static class Ta
         return outp;
     }
 
+    public readonly record struct MacdSeries(double[] Line, double[] Signal, double[] Histogram);
+
+    /// <summary>EMA-MACD. Histogram is line − signal; a zero-cross of the histogram is a momentum flip.</summary>
+    public static MacdSeries Macd(IReadOnlyList<double> close, int fast, int slow, int signal)
+    {
+        var n = close.Count;
+        var line = Filled(n);
+        var sig = Filled(n);
+        var hist = Filled(n);
+        if (fast <= 0 || slow <= fast || signal <= 0 || n < slow + signal) return new MacdSeries(line, sig, hist);
+
+        var emaFast = Ema(close, fast);
+        var emaSlow = Ema(close, slow);
+        for (int i = 0; i < n; i++)
+        {
+            if (IsUsable(emaFast[i]) && IsUsable(emaSlow[i]))
+                line[i] = emaFast[i] - emaSlow[i];
+        }
+
+        var usable = line.Where(IsUsable).ToArray();
+        if (usable.Length < signal) return new MacdSeries(line, sig, hist);
+        var sigRaw = Ema(usable, signal);
+
+        int first = -1;
+        for (int i = 0; i < n; i++)
+            if (IsUsable(line[i])) { first = i; break; }
+        if (first < 0) return new MacdSeries(line, sig, hist);
+
+        for (int j = 0; j < sigRaw.Length; j++)
+        {
+            int i = first + j;
+            if (i >= n) break;
+            sig[i] = sigRaw[j];
+            if (IsUsable(line[i]) && IsUsable(sig[i]))
+                hist[i] = line[i] - sig[i];
+        }
+
+        return new MacdSeries(line, sig, hist);
+    }
+
+    public readonly record struct StochSeries(double[] K, double[] D);
+
+    /// <summary>Slow stochastic: raw %K over <paramref name="period"/>, then SMA-smoothed %K and %D.</summary>
+    public static StochSeries Stochastic(IReadOnlyList<Candle> candles, int period, int smoothK, int smoothD)
+    {
+        var n = candles.Count;
+        var raw = Filled(n);
+        if (period <= 1 || n < period) return new StochSeries(raw, Filled(n));
+
+        for (int i = period - 1; i < n; i++)
+        {
+            double hh = double.MinValue, ll = double.MaxValue;
+            for (int j = i - period + 1; j <= i; j++)
+            {
+                hh = Math.Max(hh, (double)candles[j].High);
+                ll = Math.Min(ll, (double)candles[j].Low);
+            }
+            var range = hh - ll;
+            raw[i] = range <= 0 ? 50 : 100 * ((double)candles[i].Close - ll) / range;
+        }
+
+        var k = Smooth(raw, Math.Max(1, smoothK));
+        var d = Smooth(k, Math.Max(1, smoothD));
+        return new StochSeries(k, d);
+    }
+
+    private static double[] Smooth(double[] src, int period)
+    {
+        var outp = Filled(src.Length);
+        for (int i = 0; i < src.Length; i++)
+        {
+            if (i < period - 1) continue;
+            double sum = 0;
+            bool ok = true;
+            for (int j = 0; j < period; j++)
+            {
+                if (!IsUsable(src[i - j])) { ok = false; break; }
+                sum += src[i - j];
+            }
+            if (ok) outp[i] = sum / period;
+        }
+        return outp;
+    }
+
+    /// <summary>Highest high of the prior <paramref name="period"/> bars (excludes index i).</summary>
+    public static double PriorHighestHigh(IReadOnlyList<Candle> candles, int i, int period)
+    {
+        if (i < period || period <= 0) return double.NaN;
+        double hh = double.MinValue;
+        for (int j = i - period; j < i; j++) hh = Math.Max(hh, (double)candles[j].High);
+        return hh;
+    }
+
+    /// <summary>Lowest low of the prior <paramref name="period"/> bars (excludes index i).</summary>
+    public static double PriorLowestLow(IReadOnlyList<Candle> candles, int i, int period)
+    {
+        if (i < period || period <= 0) return double.NaN;
+        double ll = double.MaxValue;
+        for (int j = i - period; j < i; j++) ll = Math.Min(ll, (double)candles[j].Low);
+        return ll;
+    }
+
     /// <summary>Slope of the last <paramref name="lookback"/> values, normalised by the level (per-bar fraction).</summary>
     public static double NormalisedSlope(IReadOnlyList<double> series, int lookback)
     {

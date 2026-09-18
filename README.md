@@ -30,11 +30,13 @@ dotnet run --project TraderApp -- --signals-only
 dotnet run --project TraderApp
 ```
 
-**3. Live — requires both config flags *and* typing `LIVE` at the prompt:**
+**3. Live (the default — real orders, no prompt):**
 
 ```bash
-dotnet run --project TraderApp -- --live
+dotnet run --project TraderApp
 ```
+
+Add `--dry-run` to log decisions without sending orders.
 
 ### Credentials
 
@@ -56,22 +58,25 @@ withdrawal — and IP-allowlist it in the WhiteBIT UI.
 
 ## How it decides
 
-Six components vote independently; a trade needs a weighted score above
+Nine components vote independently; a trade needs a weighted score above
 `Signals.MinScore` **and** at least `MinConfirmations` components agreeing
-**and** a fresh trigger (RSI / Bollinger / volume / book totaling
-`MinTriggerWeight`) **and** no veto. Regime, EMA and VWAP are background
-state — they can stay aligned for hours and must not open a trade on their
-own. Neutral votes are ignored in the score so they cannot dilute a real
-setup.
+**and** a fresh trigger (RSI / Bollinger / volume / book / MACD / stochastic /
+structure totaling `MinTriggerWeight`) **and** no veto. Regime, EMA and VWAP
+are background state — they can stay aligned for hours and must not open a
+trade on their own. Neutral votes are ignored in the score so they cannot
+dilute a real setup.
 
 | Component | Weight | What it reads |
 |---|---|---|
 | `regime` | 0.28 | EMA50 on the higher timeframe — price above/below it and its slope |
 | `rsi` | 0.20 | Wilder RSI: pullback through 50 when trending, band exits when chopping |
-| `bollinger` / `vwap` | 0.14 | Mean reversion in chop, VWAP side in a trend (whichever applies) |
 | `ema` | ≤0.18 | EMA9 vs EMA21, weighted by how far apart they are |
+| `bollinger` / `vwap` | 0.14 | Mean reversion in chop, VWAP side in a trend (whichever applies) |
+| `macd` | 0.12 | Histogram crossing through zero (12/26/9) |
+| `stoch` | 0.12 | Slow stochastic %K/%D lift from oversold or roll from overbought |
 | `volume` | 0.10 | Bar volume vs its 20-bar average, with the bar's direction |
 | `book` | 0.10 | Resting bid/ask imbalance over the top 10 levels |
+| `structure` | 0.10 | Donchian-20 break in a trend; engulfing bar in chop |
 
 **Vetoes** — absolute, they override any score:
 
@@ -130,7 +135,7 @@ The settings worth knowing:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Trading.DryRun` | `true` | Must be `false` **and** `IUnderstandThisTradesRealMoney: true` to trade |
+| `Trading.DryRun` | `false` | `true` or `--dry-run` logs decisions and sends no orders |
 | `Trading.EntryInterval` | `15m` | Set by fee economics - see below |
 | `Trading.RegimeInterval` | `4h` | Higher-timeframe filter |
 | `Trading.Leverage` | `3` | Account-wide, set at startup |
@@ -250,6 +255,96 @@ trading activity (markets, sizes, prices, PnL) to Telegram's servers.
 
 ---
 
+## Backtesting
+
+```bash
+dotnet run --project TraderApp -- --backtest --days 45
+```
+
+Replays the real `SignalEngine` and `ExitRules` over historical candles. The
+stop/exit logic lives in one place (`Trading/ExitRules.cs`) and is used by both
+the live trader and the replay, so the backtest cannot measure a different
+strategy than the one that trades.
+
+| Flag | Effect |
+|---|---|
+| `--days N` | Window length (default 30, max 365). History is cached on disk. |
+| `--sweep` | 81 combinations of MinScore / MinConfirmations / stop / target |
+| `--fee X` | Assume a round-trip fee of X% instead of the market's |
+
+**What it cannot model**, and therefore where it flatters reality: there is no
+historical order book, so the `book` component always abstains and the spread
+veto uses a fixed 3 bps; stops and trails are evaluated at bar close rather than
+every few seconds; fills are complete at the modelled price with no queue,
+partial fills or funding. When a bar touches both stop and target, the stop is
+assumed to have filled first. Use it to compare configurations, not to forecast
+PnL.
+
+### Measured result, 2026-08-01 to 2026-09-15
+
+```
+Trades 203 | win rate 46.8% | needed 45.0%
+Net -11.49 USDT   (gross +4.75, fees 16.24)
+Exits: stop hit 82%, target hit 12%, scratch 6%
+```
+
+The signals have a real but thin directional edge. Fees are 3.4x that edge.
+A sweep of 81 parameter sets produced **0 profitable configurations**, and
+`MinScore` had no effect at all across 0.55/0.62/0.68 - the other gates bind
+first, so tuning it does nothing.
+
+Fee sensitivity on the same trades:
+
+| Round-trip fee | Net |
+|---|---|
+| 0.20% (current) | -11.49 |
+| 0.14% | -4.03 |
+| 0.10% | -1.66 |
+| 0.08% | -0.29 |
+| 0.06% | +1.49 |
+
+Break-even sits near 0.077% round trip, about 0.039% per side. The binding
+constraint on this strategy is the fee tier, not the signal set - and even
+below it the edge is worth roughly +1.5 USDT per 45 days at 40 USDT notional.
+
+---
+
+## Signal quality
+
+```bash
+dotnet run --project TraderApp -- --backtest --signal-quality --days 45
+```
+
+Measures whether entries predict direction, separately from stops, targets and
+fees. The backtest answers "did this make money", which conflates prediction
+with execution — a bad exit rule can bury a good signal, which is exactly what
+was happening here.
+
+Result over Aug–Sep 2026 (64 signals):
+
+| Horizon | Mean move | Hit rate | t |
+|---|---|---|---|
+| 1 bar | +0.07% | 45.3% | 0.45 |
+| 4 bars | +0.26% | 51.6% | 1.01 |
+| **8 bars** | **+0.48%** | **59.4%** | **1.78** |
+| 16 bars | +0.70% | 53.1% | 1.69 |
+
+The edge appears at 8–16 bars (2–4 hours), not immediately. A break-even stop
+at entry+fees closed a third of trades near zero long before that. Turning it
+off, with a 120-minute hold cap, moved gross PnL across three independent
+45-day windows from −1.38 to +14.71 — positive in all three.
+
+**t below 2 means the result is still consistent with chance.** The exit change
+is well supported (3/3 windows); the underlying edge is not yet proven.
+
+Per-component value at the 8-bar horizon: `macd` (t=2.20) and `ema` (t=2.02)
+carry information; `regime` (1.78) and `volume` (1.33) do not; `bollinger`,
+`rsi`, `stoch`, `structure` and `vwap` voted on fewer than a quarter of signals,
+so they mostly add parameters rather than information. `book` cannot be
+evaluated here — the replay has no historical order book.
+
+---
+
 ## Project layout
 
 ```
@@ -268,8 +363,14 @@ TraderApp/
   Risk/RiskManager.cs          sizing, limits, circuit breakers
   Notifications/
     TelegramNotifier.cs        queued, non-blocking Telegram delivery
+  Backtest/
+    BacktestRunner.cs          --backtest entry point, reporting, sweep
+    SignalQuality.cs           --signal-quality: does the entry predict?
+    Backtester.cs              bar-by-bar replay
+    HistoryLoader.cs           paged kline download with disk cache
   Trading/
     AutoTrader.cs              the loop, entries, position management
+    ExitRules.cs               stop/exit logic shared by live and backtest
     SignalMonitor.cs           --signals-only mode
     Log.cs                     console + file logging + notifier hook
 ```
@@ -289,3 +390,80 @@ Logs are written to `bin/<config>/net10.0/logs/trader-YYYYMMDD.log`.
   mode on the account, set it on the order payloads.
 - **Rate limits.** Private requests are serialised with a configurable minimum
   gap and retried with exponential backoff and jitter on 429/5xx.
+
+---
+
+## CI/CD (Netlify-style: merge → live)
+
+Push or merge to `main` or `master` builds the bot and, once a VPS is wired up,
+copies the new binary and restarts `systemd`. API keys never go through GitHub —
+they stay in `/etc/trader/env` on the server.
+
+A normal start is live. No prompt, no `--live` flag.
+
+### 1. Put the repo on GitHub
+
+This tree has no remote yet. Create a **private** repo, then:
+
+```bash
+git remote add origin https://github.com/YOU/TraderApp.git
+git push -u origin master
+```
+
+GitHub → Settings → General → Default branch: rename to `main` if you want
+that name. Both names trigger deploy.
+
+### 2. One-time VPS setup
+
+On an Ubuntu box (Oracle Always Free, etc.):
+
+```bash
+sudo apt update && sudo apt install -y rsync
+# copy this repo once, then:
+bash deploy/install.sh
+sudo nano /etc/trader/env
+```
+
+Create a **deploy-only SSH key** (not your daily key):
+
+```bash
+ssh-keygen -t ed25519 -C "github-deploy" -f trader-deploy -N ""
+# public key on the VPS:
+cat trader-deploy.pub >> ~/.ssh/authorized_keys
+```
+
+Allowlist the VPS public IP on the WhiteBIT API key.
+
+### 3. GitHub settings (like Netlify env)
+
+**Settings → Secrets and variables → Actions**
+
+| Kind | Name | Value |
+|---|---|---|
+| Variable | `DEPLOY_HOST` | VPS public IP or DNS |
+| Variable | `DOTNET_RID` | `linux-x64` (Intel/AMD) or `linux-arm64` (Oracle Ampere) |
+| Variable | `DEPLOY_SSH_PORT` | `22` if you omit it |
+| Secret | `DEPLOY_USER` | `ubuntu` |
+| Secret | `DEPLOY_SSH_KEY` | full private key (`-----BEGIN …`) from `trader-deploy` |
+
+**Settings → Environments → New environment → `production`**
+
+Optional: required reviewers (Netlify “deploy lock”). Leave unprotected for
+automatic deploys.
+
+Until `DEPLOY_HOST` is set, merge still runs **CI** and uploads a build
+artifact; the **Deploy** job is skipped.
+
+### 4. What a merge does
+
+1. `CI` compiles on every PR and push.
+2. `Deploy` publishes a self-contained `TraderApp` binary.
+3. SCP → `/opt/trader/incoming`
+4. `systemctl stop trader` (open positions are **not** closed)
+5. rsync into `/opt/trader/app`, `systemctl start trader`
+
+Manual redeploy: Actions → Deploy → Run workflow.
+
+```bash
+sudo journalctl -u trader -f
+```

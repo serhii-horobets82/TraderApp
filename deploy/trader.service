@@ -1,0 +1,18 @@
+[Unit]
+Description=TraderApp WhiteBIT bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/trader/app
+EnvironmentFile=/etc/trader/env
+ExecStart=/opt/trader/app/TraderApp
+Restart=always
+RestartSec=10
+# Positions stay open across restarts; the bot adopts them on boot.
+KillSignal=SIGINT
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target

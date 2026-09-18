@@ -25,6 +25,9 @@ internal sealed class ManagedPosition
     public decimal HighWater { get; set; }
 
     public bool MovedToBreakEven { get; set; }
+
+    /// <summary>Best R-multiple the trade ever reached. Distinguishes "never worked" from "worked then faded".</summary>
+    public decimal MaxFavourableR { get; set; }
     public bool Adopted { get; init; }
 
     /// <summary>Set once a close has been requested, so it is never requested twice.</summary>
@@ -75,7 +78,7 @@ public sealed class AutoTrader : IAsyncDisposable
         _telegram = telegram;
         _signals = new SignalEngine(cfg.Signals);
         _risk = new RiskManager(cfg.Risk, cfg.Trading);
-        _live = !cfg.Trading.DryRun && cfg.Trading.IUnderstandThisTradesRealMoney;
+        _live = !cfg.Trading.DryRun;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -332,15 +335,32 @@ public sealed class AutoTrader : IAsyncDisposable
             }
         }
 
+        var take = Math.Max(1, Math.Min(slots, _cfg.Trading.MaxEntriesPerTick));
         foreach (var chosen in candidates
                      .OrderByDescending(c => c.Signal.Score)
                      .ThenBy(c => c.Signal.SpreadBps)
-                     .Take(1))
+                     .Take(take))
         {
             if (!_risk.CanOpenNewPosition(chosen.Signal.Market, positions, out _, _pending.Count, reserved))
-                break;
+                continue;
+            if (!AllowsDirection(chosen.Signal.Direction == Signals.Direction.Long, positions))
+            {
+                Log.Info($"{chosen.Signal.Market}: skipped - already at the same-direction cap " +
+                         $"({_cfg.Risk.MaxSameDirectionPositions})");
+                continue;
+            }
             await PlaceEntryAsync(chosen, ct);
+            reserved.Add(chosen.Signal.Market);
         }
+    }
+
+    private bool AllowsDirection(bool isLong, IReadOnlyList<Position> positions)
+    {
+        var cap = _cfg.Risk.MaxSameDirectionPositions;
+        if (cap <= 0) return true;
+        var open = positions.Count(p => p.AbsAmount > 0 && p.IsLong == isLong);
+        var pending = _pending.Count(p => p.IsLong == isLong);
+        return open + pending < cap;
     }
 
     private async Task<ScannedEntry?> ScanEntryAsync(
@@ -560,7 +580,7 @@ public sealed class AutoTrader : IAsyncDisposable
             var notional = rec.AvgEntryPrice * rec.ClosedSize;
             var pct = notional > 0 ? rec.NetPnl / notional * 100m : 0m;
 
-            _risk.RecordTradeResult(profitable: rec.NetPnl > 0);
+            _risk.RecordTradeResult(profitable: rec.NetPnl > 0, netPnl: rec.NetPnl);
             Log.Trade($"{t.Market} #{t.PositionId} closed: net {rec.NetPnl:+0.0000;-0.0000} USDT " +
                       $"({pct:+0.00;-0.00}%), fees {rec.TotalTradeFee:F4}, funding {rec.TotalFunding:F4}");
 
@@ -618,16 +638,34 @@ public sealed class AutoTrader : IAsyncDisposable
         if (m.IsLong) m.HighWater = Math.Max(m.HighWater, mark);
         else m.HighWater = m.HighWater == 0 ? mark : Math.Min(m.HighWater, mark);
 
+        if (rMultiple > m.MaxFavourableR) m.MaxFavourableR = rMultiple;
+
         // 1. Break-even: once the trade has paid for itself, stop letting it lose.
-        if (!m.MovedToBreakEven && _cfg.Trading.BreakEvenAtR > 0 && rMultiple >= _cfg.Trading.BreakEvenAtR)
+        //
+        // The break-even stop sits at entry + the round-trip fee, so in R terms
+        // it sits feeCushionR above entry - between 0.27R and 0.68R depending on
+        // the market's ATR. Triggering below that would place the stop ABOVE the
+        // current mark and close the trade instantly; triggering far above it
+        // (the old fixed 1.15R) means break-even almost never arms and every
+        // fade becomes a full fee loss. So the trigger is derived per market and
+        // the configured value acts only as a floor.
+        var stopDistancePrice = m.EntryAtr * _cfg.Trading.StopLossAtrMult;
+        var feeCushion = m.EntryPrice * (_risk.RoundTripFeePct(rules) / 100m);
+        var feeCushionR = stopDistancePrice > 0 ? feeCushion / stopDistancePrice : 0m;
+        var breakEvenTrigger = Math.Max(_cfg.Trading.BreakEvenAtR, feeCushionR + _cfg.Trading.BreakEvenBufferR);
+
+        if (!m.MovedToBreakEven && breakEvenTrigger > 0 && rMultiple >= breakEvenTrigger)
         {
-            var feeCushion = m.EntryPrice * (_risk.RoundTripFeePct(rules) / 100m);
             var be = rules.SnapPriceForSide(m.EntryPrice + sign * feeCushion, isBuy: !m.IsLong);
-            if ((m.IsLong && be > m.StopPrice) || (!m.IsLong && be < m.StopPrice))
+            var improves = (m.IsLong && be > m.StopPrice) || (!m.IsLong && be < m.StopPrice);
+            var behindMark = (m.IsLong && be < mark) || (!m.IsLong && be > mark);
+
+            if (improves && behindMark)
             {
                 m.StopPrice = be;
                 m.MovedToBreakEven = true;
-                Log.Trade($"{pos.Market}: stop moved to break-even+fees {rules.FormatPriceRaw(be)} at {rMultiple:F2}R");
+                Log.Trade($"{pos.Market}: stop moved to break-even+fees {rules.FormatPriceRaw(be)} " +
+                          $"at {rMultiple:F2}R (trigger {breakEvenTrigger:F2}R)");
             }
         }
 
@@ -656,8 +694,21 @@ public sealed class AutoTrader : IAsyncDisposable
             exitReason = $"time stop after {_cfg.Trading.MaxPositionMinutes} minutes";
         else if (_cfg.Trading.ScratchUnprofitableMinutes > 0 &&
                  rMultiple < 0 &&
+                 m.MaxFavourableR < _cfg.Trading.ScratchMaxFavourableR &&
                  DateTime.UtcNow - m.OpenedUtc > TimeSpan.FromMinutes(_cfg.Trading.ScratchUnprofitableMinutes))
-            exitReason = $"unprofitable after {_cfg.Trading.ScratchUnprofitableMinutes} minutes ({rMultiple:F2}R)";
+            // Only scratch a trade that never went anywhere. A trade that
+            // reached a decent excursion has its break-even stop armed, and
+            // closing it merely because it is fractionally red at an arbitrary
+            // minute pays the full round trip for nothing - which is exactly
+            // how ten consecutive "losses" were manufactured out of fees.
+            exitReason = $"never worked - {rMultiple:F2}R now, best {m.MaxFavourableR:F2}R " +
+                         $"in {_cfg.Trading.ScratchUnprofitableMinutes} minutes";
+        else if (_cfg.Trading.GiveBackArmR > 0 &&
+                 m.MaxFavourableR >= _cfg.Trading.GiveBackArmR &&
+                 rMultiple > 0 &&
+                 m.MaxFavourableR - rMultiple >= _cfg.Trading.GiveBackDropR &&
+                 moveInFavour / m.EntryPrice * 100m >= _risk.RoundTripFeePct(rules) * 1.3m)
+            exitReason = $"gave back peak {m.MaxFavourableR:F2}R to {rMultiple:F2}R";
         else if (await ShouldExitAgainstRegimeAsync(pos, m, rMultiple, ct))
             exitReason = "position fights the higher-timeframe regime while underwater";
 
@@ -753,10 +804,9 @@ public sealed class AutoTrader : IAsyncDisposable
     private async Task<bool> ShouldExitAgainstRegimeAsync(
         Position pos, ManagedPosition m, decimal rMultiple, CancellationToken ct)
     {
-        if (rMultiple >= 0.2m) return false;
-        // Adopted losers are checked immediately; bot-opened ones after one bar.
+        if (rMultiple >= -0.5m) return false;
         var age = DateTime.UtcNow - m.OpenedUtc;
-        if (!m.Adopted && age < TimeSpan.FromMinutes(15)) return false;
+        if (age < TimeSpan.FromMinutes(90)) return false;
         if (_tick % 12 != 1) return false;
 
         try

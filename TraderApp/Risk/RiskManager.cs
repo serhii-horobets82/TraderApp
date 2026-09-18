@@ -81,8 +81,11 @@ public sealed class RiskManager
         return false;
     }
 
-    public void RecordTradeResult(bool profitable)
+    public void RecordTradeResult(bool profitable, decimal? netPnl = null)
     {
+        if (netPnl is { } n && Math.Abs(n) <= _cfg.FeeNoiseUsd)
+            return;
+
         if (profitable)
         {
             _consecutiveLosses = 0;
@@ -198,11 +201,17 @@ public sealed class RiskManager
         // naive "close at +0.4% PnL" scalp nets in the first place.
         var roundTripFee = RoundTripFeePct(rules);
         var takePct = takeDistance / entryPrice * 100m;
+        var stopPct = stopDistance / entryPrice * 100m;
         var required = roundTripFee + _cfg.MinNetEdgePct;
         if (takePct < required)
             return new SizingResult(false, 0, 0, 0, 0,
                 $"target {takePct:F3}% below fee-adjusted minimum {required:F3}% " +
                 $"(round-trip fee {roundTripFee:F3}% + edge {_cfg.MinNetEdgePct:F3}%)");
+
+        var minStop = Math.Max(_cfg.MinStopPct, roundTripFee * _cfg.MinStopFeeMultiple);
+        if (stopPct < minStop)
+            return new SizingResult(false, 0, 0, 0, 0,
+                $"stop {stopPct:F3}% is inside the fee band (need {minStop:F3}%) - a winner still dies on the round trip");
 
         var riskAmount = equity * (_cfg.RiskPerTradePct / 100m);
         var amount = riskAmount / stopDistance;

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using TraderApp.Backtest;
 using TraderApp.Configuration;
 using TraderApp.Exchange;
 using TraderApp.Notifications;
@@ -14,16 +15,26 @@ internal static class Program
 
         var config = LoadConfig(args);
 
-        // CLI overrides, for the two switches you most want to be explicit about.
-        if (args.Contains("--live", StringComparer.OrdinalIgnoreCase))
-        {
-            config.Trading.DryRun = false;
-            config.Trading.IUnderstandThisTradesRealMoney = true;
-        }
-        if (args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase))
-            config.Trading.DryRun = true;
-
         var signalsOnly = args.Contains("--signals-only", StringComparer.OrdinalIgnoreCase);
+        var dryRun = args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase);
+
+        if (args.Contains("--backtest", StringComparer.OrdinalIgnoreCase))
+        {
+            var days = 30;
+            var idx = Array.FindIndex(args, a => a.Equals("--days", StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0 && idx + 1 < args.Length) int.TryParse(args[idx + 1], out days);
+            var sweep = args.Contains("--sweep", StringComparer.OrdinalIgnoreCase);
+            decimal fee = 0m;
+            var fi = Array.FindIndex(args, a => a.Equals("--fee", StringComparison.OrdinalIgnoreCase));
+            if (fi >= 0 && fi + 1 < args.Length) decimal.TryParse(args[fi + 1],
+                System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out fee);
+            var endAgo = 0;
+            var ei = Array.FindIndex(args, a => a.Equals("--end-days-ago", StringComparison.OrdinalIgnoreCase));
+            if (ei >= 0 && ei + 1 < args.Length) int.TryParse(args[ei + 1], out endAgo);
+            var sq = args.Contains("--signal-quality", StringComparer.OrdinalIgnoreCase);
+            return await BacktestRunner.RunAsync(config, Math.Clamp(days, 1, 365), sweep,
+                CancellationToken.None, fee, Math.Clamp(endAgo, 0, 720), sq);
+        }
 
         if (args.Contains("--telegram-test", StringComparer.OrdinalIgnoreCase))
             return await TelegramNotifier.RunSetupCheckAsync(config.Telegram, CancellationToken.None);
@@ -43,15 +54,12 @@ internal static class Program
             return 1;
         }
 
-        var live = !signalsOnly && !config.Trading.DryRun && config.Trading.IUnderstandThisTradesRealMoney;
+        // Default is live. appsettings DryRun is ignored; only these flags opt out.
+        config.Trading.DryRun = dryRun || signalsOnly;
+        config.Trading.IUnderstandThisTradesRealMoney = true;
+        var live = !signalsOnly && !dryRun;
 
         PrintBanner(config, live, signalsOnly);
-
-        if (live && !ConfirmLive())
-        {
-            Log.Info("live trading not confirmed - exiting");
-            return 0;
-        }
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -159,13 +167,5 @@ internal static class Program
         Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
         Console.WriteLine("  Ctrl+C to stop.");
         Console.WriteLine();
-    }
-
-    private static bool ConfirmLive()
-    {
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.Write("  Type LIVE to confirm real-money trading: ");
-        Console.ResetColor();
-        return string.Equals(Console.ReadLine()?.Trim(), "LIVE", StringComparison.Ordinal);
     }
 }

@@ -9,7 +9,7 @@ public enum Direction { None, Long, Short }
 public sealed record SignalComponent(string Name, Direction Direction, double Weight, string Detail)
 {
     /// <summary>Event-like votes. Regime/EMA/VWAP are background state and can stay true for hours.</summary>
-    public bool IsTrigger => Name is "rsi" or "bollinger" or "volume" or "book";
+    public bool IsTrigger => Name is "rsi" or "bollinger" or "volume" or "book" or "macd" or "stoch" or "structure";
 }
 
 public sealed record TradeSignal
@@ -66,7 +66,10 @@ public sealed class SignalEngine
 
         // Indicators read the last CLOSED bar. Scoring the still-forming candle
         // made SOL flicker 0.58 → 0.48 between ticks and missed one-bar triggers.
-        var need = Math.Max(_cfg.EmaRegime, Math.Max(_cfg.AdxPeriod * 2 + 2, _cfg.BollingerPeriod)) + 6;
+        var need = Math.Max(_cfg.EmaRegime,
+                       Math.Max(_cfg.AdxPeriod * 2 + 2,
+                       Math.Max(_cfg.BollingerPeriod,
+                       Math.Max(_cfg.MacdSlow + _cfg.MacdSignal, _cfg.DonchianPeriod)))) + 6;
         if (entryCandles.Count < need)
             return Blocked(market, price, $"not enough entry candles ({entryCandles.Count}/{need})");
         if (regimeCandles.Count < _cfg.EmaRegime + 3)
@@ -85,6 +88,8 @@ public sealed class SignalEngine
         var bb = Ta.Bollinger(closes, _cfg.BollingerPeriod, _cfg.BollingerStdDev);
         var volMa = Ta.Sma(volumes, _cfg.VolumeMaPeriod);
         var vwap = Ta.RollingVwap(entryCandles, _cfg.BollingerPeriod);
+        var macd = Ta.Macd(closes, _cfg.MacdFast, _cfg.MacdSlow, _cfg.MacdSignal);
+        var stoch = Ta.Stochastic(entryCandles, _cfg.StochPeriod, _cfg.StochSmoothK, _cfg.StochSmoothD);
 
         int i = entryCandles.Count - 2;
         var atrNow = Ta.IsUsable(atr[i]) ? (decimal)atr[i] : 0m;
@@ -197,7 +202,7 @@ public sealed class SignalEngine
             var prevRatio = Ta.IsUsable(volMa[i - 1]) && volMa[i - 1] > 0 ? volumes[i - 1] / volMa[i - 1] : 0;
             var best = Math.Max(ratio, prevRatio);
             var body = closes[i] - (double)entryCandles[i].Open;
-            var dir = best >= 1.15 ? (body >= 0 ? Direction.Long : Direction.Short) : Direction.None;
+            var dir = best >= 1.05 ? (body >= 0 ? Direction.Long : Direction.Short) : Direction.None;
             components.Add(new SignalComponent("volume", dir, 0.10, $"vol {ratio:F2}x MA{_cfg.VolumeMaPeriod}"));
         }
 
@@ -208,6 +213,65 @@ public sealed class SignalEngine
             : imb < -_cfg.ImbalanceThreshold ? Direction.Short
             : Direction.None;
         components.Add(new SignalComponent("book", imbDir, 0.10, $"imbalance {imb:+0.00;-0.00}"));
+
+        // 7. MACD histogram flip - momentum, not the same as EMA9/21.
+        if (i > 0 && Ta.IsUsable(macd.Histogram[i]) && Ta.IsUsable(macd.Histogram[i - 1]))
+        {
+            Direction dir = Direction.None;
+            var h = macd.Histogram[i];
+            var hp = macd.Histogram[i - 1];
+            string detail = $"hist {h:+0.0000;-0.0000}";
+            if (hp <= 0 && h > 0) { dir = Direction.Long; detail += " crossed above 0"; }
+            else if (hp >= 0 && h < 0) { dir = Direction.Short; detail += " crossed below 0"; }
+            components.Add(new SignalComponent("macd", dir, 0.12, detail));
+        }
+
+        // 8. Slow stochastic. Independent of RSI: it uses the bar's range, not
+        //    close-to-close gains. Only votes on a cross out of the band.
+        if (i > 0 && Ta.IsUsable(stoch.K[i]) && Ta.IsUsable(stoch.D[i]) &&
+            Ta.IsUsable(stoch.K[i - 1]) && Ta.IsUsable(stoch.D[i - 1]))
+        {
+            Direction dir = Direction.None;
+            string detail = $"%K {stoch.K[i]:F1} / %D {stoch.D[i]:F1}";
+            var crossedUp = stoch.K[i - 1] <= stoch.D[i - 1] && stoch.K[i] > stoch.D[i];
+            var crossedDown = stoch.K[i - 1] >= stoch.D[i - 1] && stoch.K[i] < stoch.D[i];
+            if (crossedUp && stoch.K[i] <= _cfg.StochOversold + 15)
+            { dir = Direction.Long; detail += " lift from oversold"; }
+            else if (crossedDown && stoch.K[i] >= _cfg.StochOverbought - 15)
+            { dir = Direction.Short; detail += " roll from overbought"; }
+            components.Add(new SignalComponent("stoch", dir, 0.12, detail));
+        }
+
+        // 9. Price structure. Trend: Donchian break. Chop: engulfing bar.
+        {
+            Direction dir = Direction.None;
+            string detail = "no structure";
+            if (trending)
+            {
+                var hh = Ta.PriorHighestHigh(entryCandles, i, _cfg.DonchianPeriod);
+                var ll = Ta.PriorLowestLow(entryCandles, i, _cfg.DonchianPeriod);
+                // Breakouts are the low-win-rate side. Prefer a close back
+                // through the prior extreme after a tag, not a fresh chase.
+                if (Ta.IsUsable(hh) && closes[i] > hh && closes[i - 1] <= hh && rsiNow < _cfg.MaxTrendRsiLong - 4)
+                { dir = Direction.Long; detail = $"Donchian{_cfg.DonchianPeriod} high, RSI not extended"; }
+                else if (Ta.IsUsable(ll) && closes[i] < ll && closes[i - 1] >= ll && rsiNow > _cfg.MinTrendRsiShort + 4)
+                { dir = Direction.Short; detail = $"Donchian{_cfg.DonchianPeriod} low, RSI not extended"; }
+            }
+            else if (i > 0)
+            {
+                var prev = entryCandles[i - 1];
+                var curr = entryCandles[i];
+                var prevBody = Math.Abs(prev.Close - prev.Open);
+                var currBody = Math.Abs(curr.Close - curr.Open);
+                var bull = curr.Close > curr.Open && prev.Close < prev.Open &&
+                           curr.Close >= prev.Open && curr.Open <= prev.Close && currBody > prevBody;
+                var bear = curr.Close < curr.Open && prev.Close > prev.Open &&
+                           curr.Close <= prev.Open && curr.Open >= prev.Close && currBody > prevBody;
+                if (bull) { dir = Direction.Long; detail = "bullish engulfing"; }
+                else if (bear) { dir = Direction.Short; detail = "bearish engulfing"; }
+            }
+            components.Add(new SignalComponent("structure", dir, 0.10, detail));
+        }
 
         // ── Aggregate ───────────────────────────────────────────────────
         // Neutral votes used to sit in the denominator and silently fail a
@@ -228,11 +292,25 @@ public sealed class SignalEngine
 
         if (chosen != Direction.None)
         {
-            // Never take a trade against a decided higher-timeframe regime.
-            if (regime != Direction.None && regime != chosen)
+            // Win-rate filter: never fade a decided higher-timeframe. Flat HTF
+            // is also skipped - those were the coin-flip chop entries.
+            if (regime == Direction.None)
+                vetoes.Add("no higher-timeframe regime - wait for a decided 1h");
+            else if (regime != chosen)
                 vetoes.Add($"direction {chosen} fights the {regimeLabel} regime");
             if (score < _cfg.MinScore)
                 vetoes.Add($"score {score:F2} < {_cfg.MinScore:F2}");
+
+            // `score` is agreement among components that voted, so three weak
+            // votes with everything else abstaining reads as a perfect 1.00 -
+            // which is how SUI was entered at RSI 65.7 with a flat regime on
+            // ema+vwap+volume totalling 0.42 of weight. Agreement is not
+            // conviction: also require an absolute amount of weight behind the
+            // direction, measured against the full 1.00 of available weight.
+            var agreeingWeight = chosen == Direction.Long ? longScore : shortScore;
+            if (agreeingWeight < _cfg.MinAgreeingWeight)
+                vetoes.Add($"thin conviction - only {agreeingWeight:F2} of weight agrees " +
+                           $"(need {_cfg.MinAgreeingWeight:F2}); {score:F2} score is just consensus among abstainers");
             if (confirmations < _cfg.MinConfirmations)
                 vetoes.Add($"only {confirmations} confirmations, need {_cfg.MinConfirmations}");
 
@@ -242,7 +320,7 @@ public sealed class SignalEngine
                 .Where(c => c.IsTrigger && c.Direction == chosen)
                 .Sum(c => c.Weight);
             if (triggerWeight < _cfg.MinTriggerWeight)
-                vetoes.Add($"no fresh trigger (rsi/bb/volume/book weight {triggerWeight:F2} < {_cfg.MinTriggerWeight:F2})");
+                vetoes.Add($"no fresh trigger (rsi/bb/volume/book/macd/stoch/structure weight {triggerWeight:F2} < {_cfg.MinTriggerWeight:F2})");
 
             if (volRatio > 0 && volRatio < _cfg.MinVolumeRatio)
                 vetoes.Add($"dead bar volume {volRatio:F2}x < {_cfg.MinVolumeRatio:F2}x");
@@ -258,6 +336,18 @@ public sealed class SignalEngine
                     c.Name == "ema" && c.Direction != Direction.None && c.Direction != chosen && c.Weight >= 0.08);
                 if (emaFight is not null)
                     vetoes.Add($"EMA fights a trend {chosen.ToString().ToLowerInvariant()}");
+            }
+
+            if (imbDir != Direction.None && imbDir != chosen)
+                vetoes.Add($"book {imbDir} fights the {chosen} setup");
+
+            if (i > 0 && Ta.IsUsable(macd.Histogram[i]))
+            {
+                var h = macd.Histogram[i];
+                if (chosen == Direction.Long && h < 0)
+                    vetoes.Add("MACD histogram is still negative - long is fighting momentum");
+                if (chosen == Direction.Short && h > 0)
+                    vetoes.Add("MACD histogram is still positive - short is fighting momentum");
             }
         }
         else

@@ -115,6 +115,32 @@ public sealed class WhiteBitClient : IDisposable
         return candles;
     }
 
+    /// <summary>
+    /// GET /api/v1/public/kline over an explicit time range, for backtesting.
+    /// Unlike the live path this keeps the still-forming final bar out by range,
+    /// not by wall clock, so a replay sees exactly the bars that had closed.
+    /// </summary>
+    public async Task<IReadOnlyList<Indicators.Candle>> GetKlinesRangeAsync(
+        string market, string interval, DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        var start = new DateTimeOffset(DateTime.SpecifyKind(fromUtc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+        var end = new DateTimeOffset(DateTime.SpecifyKind(toUtc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+        var url = $"/api/v1/public/kline?market={market}&interval={interval}" +
+                  $"&start={start}&end={end}&limit=1440";
+
+        var raw = await GetAsync<KlineEnvelope>(url, ct);
+        if (raw is null || !raw.Success || raw.Result is null) return Array.Empty<Indicators.Candle>();
+
+        var candles = new List<Indicators.Candle>(raw.Result.Count);
+        foreach (var row in raw.Result)
+        {
+            var c = Indicators.Candle.FromKline(row);
+            if (c is not null) candles.Add(c);
+        }
+        candles.Sort((a, b) => a.OpenTime.CompareTo(b.OpenTime));
+        return candles;
+    }
+
     /// <summary>Converts a WhiteBIT kline interval (1s, 5m, 4h, 1d, 1w, 1M) to a duration.</summary>
     internal static TimeSpan ParseInterval(string interval)
     {

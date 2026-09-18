@@ -1,0 +1,84 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Publish
+        run: >
+          dotnet publish TraderApp/TraderApp.csproj
+          -c Release
+          -r ${{ vars.DOTNET_RID || 'linux-x64' }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o ./publish
+          --nologo
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trader
+          path: publish/
+          retention-days: 7
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    if: ${{ vars.DEPLOY_HOST != '' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: trader
+          path: publish
+
+      - name: Upload build to the VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ vars.DEPLOY_SSH_PORT || 22 }}
+          source: "publish/*"
+          target: ${{ vars.DEPLOY_INCOMING || '/opt/trader/incoming' }}
+          strip_components: 1
+          overwrite: true
+          rm: true
+
+      - name: Swap release and restart
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ vars.DEPLOY_SSH_PORT || 22 }}
+          envs: DEPLOY_APP,DEPLOY_INCOMING
+          script: |
+            set -euo pipefail
+            APP="${DEPLOY_APP:-/opt/trader/app}"
+            IN="${DEPLOY_INCOMING:-/opt/trader/incoming}"
+            sudo systemctl stop trader || true
+            mkdir -p "$APP"
+            rsync -a --delete --exclude logs --exclude '*.log' "$IN"/ "$APP"/
+            chmod +x "$APP/TraderApp"
+            sudo systemctl start trader
+            sleep 2
+            sudo systemctl --no-pager --full status trader
+        env:
+          DEPLOY_APP: ${{ vars.DEPLOY_APP }}
+          DEPLOY_INCOMING: ${{ vars.DEPLOY_INCOMING }}
