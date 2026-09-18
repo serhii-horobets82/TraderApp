@@ -35,30 +35,39 @@ public sealed class SignalMonitor
 
         while (!ct.IsCancellationRequested)
         {
-            foreach (var market in _cfg.Trading.Markets)
-            {
-                if (ct.IsCancellationRequested) break;
-                try
-                {
-                    var book = await _client.GetOrderBookAsync(market, Math.Max(_cfg.Signals.OrderBookDepth, 20), ct);
-                    if (book is null) { Log.Warn($"{market}: no order book"); continue; }
-
-                    var entry = await _client.GetKlinesAsync(market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
-                    var regime = await _client.GetKlinesAsync(market, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
-
-                    var s = _engine.Evaluate(market, entry, regime, book);
-
-                    var line = $"{market,-10} mid {s.Price,12} | ATR {s.AtrPct:F3}% | spread {s.SpreadBps:F2}bps | {s.Explain()}";
-                    if (s.IsActionable) Log.Trade(line); else Log.Info(line);
-
-                    foreach (var c in s.Components.Where(c => c.Weight > 0))
-                        Log.Info($"    {c.Name,-10} {c.Direction,-5} w={c.Weight:F2}  {c.Detail}");
-                }
-                catch (ApiException ex) { Log.Error(ex.Message); }
-            }
+            var scans = _cfg.Trading.Markets.Select(market => ScanMarketAsync(market, ct));
+            await Task.WhenAll(scans);
 
             try { await Task.Delay(_cfg.Trading.LoopIntervalMs, ct); }
             catch (OperationCanceledException) { break; }
+        }
+    }
+
+    private async Task ScanMarketAsync(string market, CancellationToken ct)
+    {
+        try
+        {
+            var depth = Math.Max(_cfg.Signals.OrderBookDepth, 20);
+            var bookTask = _client.GetOrderBookAsync(market, depth, ct);
+            var entryTask = _client.GetKlinesAsync(market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
+            var regimeTask = _client.GetKlinesAsync(market, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
+            await Task.WhenAll(bookTask, entryTask, regimeTask);
+
+            var book = await bookTask;
+            if (book is null) { Log.Warn($"{market}: no order book"); return; }
+
+            var s = _engine.Evaluate(market, await entryTask, await regimeTask, book);
+
+            var line = $"{market,-10} mid {s.Price,12} | ATR {s.AtrPct:F3}% | spread {s.SpreadBps:F2}bps | {s.Explain()}";
+            if (s.IsActionable) Log.Trade(line); else Log.Info(line);
+
+            foreach (var c in s.Components.Where(c => c.Weight > 0))
+                Log.Info($"    {c.Name,-10} {c.Direction,-5} w={c.Weight:F2}  {c.Detail}");
+        }
+        catch (ApiException ex) { Log.Error(ex.Message); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Error($"{market}: {ex.Message}");
         }
     }
 }

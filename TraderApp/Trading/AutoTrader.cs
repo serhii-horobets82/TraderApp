@@ -375,6 +375,7 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         var candidates = new List<ScannedEntry>();
+        var scans = new List<Task<ScannedEntry?>>();
         foreach (var market in _cfg.Trading.Markets)
         {
             if (ct.IsCancellationRequested) break;
@@ -384,15 +385,12 @@ public sealed class AutoTrader : IAsyncDisposable
                 continue;
             }
 
-            try
-            {
-                var scanned = await ScanEntryAsync(market, equity, openNotional, ct);
-                if (scanned is not null) candidates.Add(scanned);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                Log.Error($"{market}: entry evaluation failed - {ex.Message}");
-            }
+            scans.Add(ScanEntrySafeAsync(market, equity, openNotional, ct));
+        }
+
+        foreach (var scanned in await Task.WhenAll(scans))
+        {
+            if (scanned is not null) candidates.Add(scanned);
         }
 
         var take = Math.Max(1, Math.Min(slots, _cfg.Trading.MaxEntriesPerTick));
@@ -423,16 +421,35 @@ public sealed class AutoTrader : IAsyncDisposable
         return open + pending < cap;
     }
 
+    private async Task<ScannedEntry?> ScanEntrySafeAsync(
+        string market, decimal equity, decimal openNotional, CancellationToken ct)
+    {
+        try
+        {
+            return await ScanEntryAsync(market, equity, openNotional, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Error($"{market}: entry evaluation failed - {ex.Message}");
+            return null;
+        }
+    }
+
     private async Task<ScannedEntry?> ScanEntryAsync(
         string market, decimal equity, decimal openNotional, CancellationToken ct)
     {
         if (!_rules.TryGetValue(market, out var rules)) return null;
 
-        var book = await _client.GetOrderBookAsync(market, Math.Max(_cfg.Signals.OrderBookDepth, 20), ct);
-        if (book is null) return null;
+        var depth = Math.Max(_cfg.Signals.OrderBookDepth, 20);
+        var bookTask = _client.GetOrderBookAsync(market, depth, ct);
+        var entryTask = _client.GetKlinesAsync(market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
+        var regimeTask = _client.GetKlinesAsync(market, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
+        await Task.WhenAll(bookTask, entryTask, regimeTask);
 
-        var entry = await _client.GetKlinesAsync(market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
-        var regime = await _client.GetKlinesAsync(market, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
+        var book = await bookTask;
+        if (book is null) return null;
+        var entry = await entryTask;
+        var regime = await regimeTask;
 
         var signal = _signals.Evaluate(market, entry, regime, book);
 
@@ -873,11 +890,14 @@ public sealed class AutoTrader : IAsyncDisposable
 
         try
         {
-            var book = await _client.GetOrderBookAsync(pos.Market!, Math.Max(_cfg.Signals.OrderBookDepth, 20), ct);
+            var depth = Math.Max(_cfg.Signals.OrderBookDepth, 20);
+            var bookTask = _client.GetOrderBookAsync(pos.Market!, depth, ct);
+            var entryTask = _client.GetKlinesAsync(pos.Market!, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
+            var regimeTask = _client.GetKlinesAsync(pos.Market!, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
+            await Task.WhenAll(bookTask, entryTask, regimeTask);
+            var book = await bookTask;
             if (book is null) return false;
-            var entry = await _client.GetKlinesAsync(pos.Market!, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
-            var regime = await _client.GetKlinesAsync(pos.Market!, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
-            var signal = _signals.Evaluate(pos.Market!, entry, regime, book);
+            var signal = _signals.Evaluate(pos.Market!, await entryTask, await regimeTask, book);
             if (signal.RegimeDirection == Signals.Direction.None) return false;
 
             var holding = m.IsLong ? Signals.Direction.Long : Signals.Direction.Short;

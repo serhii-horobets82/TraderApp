@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
@@ -51,6 +52,8 @@ public sealed class WhiteBitClient : IDisposable
     private readonly SemaphoreSlim _privateGate = new(1, 1);
     private long _lastNonce;
     private long _lastPrivateTicks;
+    private readonly ConcurrentDictionary<string, (IReadOnlyList<Indicators.Candle> Candles, DateTime ValidUntilUtc)> _klineCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Task<IReadOnlyList<Indicators.Candle>>> _klineInflight = new(StringComparer.OrdinalIgnoreCase);
 
     public WhiteBitClient(ApiConfig cfg)
     {
@@ -85,13 +88,43 @@ public sealed class WhiteBitClient : IDisposable
     /// Element order is [timestamp, open, close, high, low, volumeStock, volumeMoney]
     /// despite what an OHLC reading of the docs sample suggests, so the parsing is
     /// done explicitly in <see cref="Candle.FromKline"/>.
+    ///
+    /// Closed bars do not change until the next interval elapses, so the live
+    /// loop reuses the last fetch until that close rather than downloading 15m
+    /// and 1h history every few seconds.
     /// </summary>
-    public async Task<IReadOnlyList<Indicators.Candle>> GetKlinesAsync(
+    public Task<IReadOnlyList<Indicators.Candle>> GetKlinesAsync(
         string market, string interval, int limit, CancellationToken ct, bool closedOnly = true)
     {
-        var url = $"/api/v1/public/kline?market={market}&interval={interval}&limit={Math.Clamp(limit, 1, 1440)}";
+        var clamped = Math.Clamp(limit, 1, 1440);
+        var key = $"{market}|{interval}|{clamped}|{(closedOnly ? "c" : "o")}";
+        if (_klineCache.TryGetValue(key, out var hit) && DateTime.UtcNow < hit.ValidUntilUtc)
+            return Task.FromResult(hit.Candles);
+
+        var task = _klineInflight.GetOrAdd(key, _ =>
+            FetchKlinesUncachedAsync(key, market, interval, clamped, closedOnly, ct));
+
+        return AwaitKlinesAsync(key, task);
+    }
+
+    private async Task<IReadOnlyList<Indicators.Candle>> AwaitKlinesAsync(
+        string key, Task<IReadOnlyList<Indicators.Candle>> task)
+    {
+        try { return await task; }
+        finally
+        {
+            if (_klineInflight.TryGetValue(key, out var current) && ReferenceEquals(current, task))
+                _klineInflight.TryRemove(key, out _);
+        }
+    }
+
+    private async Task<IReadOnlyList<Indicators.Candle>> FetchKlinesUncachedAsync(
+        string cacheKey, string market, string interval, int limit, bool closedOnly, CancellationToken ct)
+    {
+        var url = $"/api/v1/public/kline?market={market}&interval={interval}&limit={limit}";
         var raw = await GetAsync<KlineEnvelope>(url, ct);
-        if (raw is null || !raw.Success || raw.Result is null) return Array.Empty<Indicators.Candle>();
+        if (raw is null || !raw.Success || raw.Result is null)
+            return Array.Empty<Indicators.Candle>();
 
         var candles = new List<Indicators.Candle>(raw.Result.Count);
         foreach (var row in raw.Result)
@@ -105,11 +138,18 @@ public sealed class WhiteBitClient : IDisposable
         // and therefore every indicator built on it change until the bar ends.
         // Acting on it means acting on a value that repaints, and it is why the
         // volume component reads ~0x on a freshly opened bar. Drop it.
-        if (closedOnly && candles.Count > 0)
+        var duration = ParseInterval(interval);
+        if (closedOnly && candles.Count > 0 && duration > TimeSpan.Zero &&
+            candles[^1].OpenTime + duration > DateTime.UtcNow)
+            candles.RemoveAt(candles.Count - 1);
+
+        if (candles.Count > 0)
         {
-            var duration = ParseInterval(interval);
-            if (duration > TimeSpan.Zero && candles[^1].OpenTime + duration > DateTime.UtcNow)
-                candles.RemoveAt(candles.Count - 1);
+            var validUntil = closedOnly && duration > TimeSpan.Zero
+                ? candles[^1].OpenTime + duration
+                : DateTime.UtcNow.AddSeconds(5);
+            if (validUntil > DateTime.UtcNow)
+                _klineCache[cacheKey] = (candles, validUntil);
         }
 
         return candles;

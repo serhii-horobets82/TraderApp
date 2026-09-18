@@ -90,7 +90,7 @@ public sealed class TradingConfig
     /// <summary>Higher timeframe used only as a regime/direction filter.</summary>
     public string RegimeInterval { get; set; } = "1h";
 
-    public int CandleLookback { get; set; } = 200;
+    public int CandleLookback { get; set; } = 100;
 
     /// <summary>Main decision loop period.</summary>
     public int LoopIntervalMs { get; set; } = 3_000;
