@@ -57,8 +57,8 @@ internal static class Program
 
         // Any of the three can force dry-run, and none of them can undo another.
         // The config value has to be honoured or a deployed instance could not be
-        // put into dry-run without editing its systemd unit - set
-        // TRADER_Trading__DryRun=true in /etc/trader/env instead.
+        // put into dry-run without a redeploy - set
+        // TRADER_Trading__DryRun=true in Railway variables instead.
         config.Trading.DryRun = config.Trading.DryRun || dryRun || signalsOnly;
         config.Trading.IUnderstandThisTradesRealMoney = true;
         var live = !signalsOnly && !dryRun;
@@ -95,11 +95,9 @@ internal static class Program
         };
 
         // Containers and orchestrators stop a process with SIGTERM, which
-        // Console.CancelKeyPress does not see - Docker, Railway, Render, Fly and
-        // Kubernetes all use it. Without this the bot is killed mid-cycle:
-        // resting entry orders are never cancelled and queued Telegram messages
-        // are lost. systemd is configured to send SIGINT instead, but relying on
-        // that would make every container host unsafe.
+        // Console.CancelKeyPress does not see. Without this the bot is killed
+        // mid-cycle: resting entry orders are never cancelled and queued
+        // Telegram messages are lost.
         using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx =>
         {
             ctx.Cancel = true;

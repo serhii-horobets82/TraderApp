@@ -24,10 +24,10 @@ dotnet build
 dotnet run --project TraderApp -- --signals-only
 ```
 
-**2. Dry run — full logic including sizing, still sends no orders (the default):**
+**2. Dry run — full logic including sizing, still sends no orders:**
 
 ```bash
-dotnet run --project TraderApp
+dotnet run --project TraderApp -- --dry-run
 ```
 
 **3. Live (the default — real orders, no prompt):**
@@ -35,8 +35,6 @@ dotnet run --project TraderApp
 ```bash
 dotnet run --project TraderApp
 ```
-
-Add `--dry-run` to log decisions without sending orders.
 
 ### Credentials
 
@@ -361,8 +359,13 @@ evaluated here — the replay has no historical order book.
 ## Project layout
 
 ```
+Dockerfile                     Railway worker image
+railway.json                   Railway build/deploy (no HTTP healthcheck)
+NuGet.config                   pin restore to nuget.org
+Directory.Build.props          stamp version from BUILD_NUMBER / git SHA
 TraderApp/
-  Program.cs                   entry point, modes, banner, confirmation
+  Program.cs                   entry point, modes, banner
+  BuildInfo.cs                 assembly version shown in the banner
   appsettings.json             all tunables
   Configuration/BotConfig.cs   typed config + validation
   Exchange/
@@ -438,6 +441,7 @@ Service → **Variables** → add:
 | `TELEGRAM_BOT_TOKEN` | bot token |
 | `TELEGRAM_CHAT_ID` | `289040655` |
 | `TRADER_Trading__DryRun` | `true` |
+| `HEALTHCHECK_PING_URL` | healthchecks.io ping URL (optional) |
 
 The double underscore in `TRADER_Trading__DryRun` is the config binder's
 separator for nested keys; it maps to `Trading.DryRun` and beats
@@ -477,124 +481,13 @@ is a good reason to keep `HeartbeatMinutes` non-zero.
 **Static outbound IP needs the Pro plan** ($20/mo, three IPs shared with other
 customers). On Hobby the egress IP is not stable, so you cannot IP-allowlist the
 WhiteBIT API key — the key is then protected only by being secret and
-trade-only. A VPS gives a dedicated fixed IP for less; see the section below.
+trade-only. A VPS is the cheaper way to get a dedicated fixed IP.
 
 **Auto-deploy has no human gate.** Every push to `main` changes what is trading
 your money. If that makes you uneasy, disable auto-deploy in service settings
 and press Deploy manually, or work on branches and merge deliberately.
 
+**`NuGet.config` pins restore to nuget.org.** Without it a private feed on the
+build machine can 401 and fail the Railway image build.
+
 ---
-
-## CI/CD (Netlify-style: merge → live)
-
-Push or merge to `main` or `master` builds the bot and, once a VPS is wired up,
-copies the new binary and restarts `systemd`. API keys never go through GitHub —
-they stay in `/etc/trader/env` on the server.
-
-A normal start is live. No prompt, no `--live` flag.
-
-### 1. Put the repo on GitHub
-
-This tree has no remote yet. Create a **private** repo, then:
-
-```bash
-git remote add origin https://github.com/YOU/TraderApp.git
-git push -u origin master
-```
-
-GitHub → Settings → General → Default branch: rename to `main` if you want
-that name. Both names trigger deploy.
-
-### 2. One-time VPS setup
-
-On an Ubuntu box (Oracle Always Free, etc.):
-
-```bash
-sudo apt update && sudo apt install -y rsync
-# copy this repo once, then:
-bash deploy/install.sh
-sudo nano /etc/trader/env
-```
-
-Create a **deploy-only SSH key** (not your daily key):
-
-```bash
-ssh-keygen -t ed25519 -C "github-deploy" -f trader-deploy -N ""
-# public key on the VPS:
-cat trader-deploy.pub >> ~/.ssh/authorized_keys
-```
-
-Allowlist the VPS public IP on the WhiteBIT API key.
-
-### 3. GitHub settings (like Netlify env)
-
-**Settings → Secrets and variables → Actions**
-
-| Kind | Name | Value |
-|---|---|---|
-| Variable | `DEPLOY_HOST` | VPS public IP or DNS |
-| Variable | `DOTNET_RID` | `linux-x64` (Intel/AMD) or `linux-arm64` (Oracle Ampere) |
-| Variable | `DEPLOY_SSH_PORT` | `22` if you omit it |
-| Secret | `DEPLOY_USER` | `ubuntu` |
-| Secret | `DEPLOY_SSH_KEY` | full private key (`-----BEGIN …`) from `trader-deploy` |
-
-**Settings → Environments → New environment → `production`**
-
-Optional: required reviewers (Netlify “deploy lock”). Leave unprotected for
-automatic deploys.
-
-Until `DEPLOY_HOST` is set, merge still runs **CI** and uploads a build
-artifact; the **Deploy** job is skipped.
-
-### 4. What a merge does
-
-1. `CI` compiles on every PR and push.
-2. `Deploy` builds, runs tests if any exist, then publishes a self-contained
-   `TraderApp` binary. A failed build or test stops the deploy.
-3. SCP → `/opt/trader/incoming`
-4. The current release is copied to `/opt/trader/previous`
-5. `systemctl stop trader` (open positions are **not** closed)
-6. rsync into `/opt/trader/app`, `systemctl start trader`
-7. **Health check**: wait 30s and confirm the restart counter has not moved.
-   `Restart=always` means a crash-looping binary still reports `active`, so
-   checking `systemctl status` right after start proves nothing. On failure the
-   previous release is restored automatically and the workflow goes red.
-
-### Safety switches
-
-`/etc/trader/env` ships with `TRADER_Trading__DryRun=true`. That env var beats
-`appsettings.json`, so it is the switch to reach for — set it and restart to
-stop trading without a deploy. Leave it on until you have watched the bot run
-on the server.
-
-```bash
-sudo systemctl stop trader
-```
-
-stops it entirely; open positions keep the exchange-side OTO stop attached at
-entry.
-
-### Deploying while a position is open
-
-The bot is down for a few seconds during the swap and re-adopts positions on
-startup. In that gap the bot-managed stop is not enforced and the time stop does
-not run — the protection is the exchange-side stop at `HardStopMultiplier`
-(1.8x) the working stop. That is wider than usual, so avoid pushing to `main`
-mid-session if you can.
-
-### Two things that would otherwise bite
-
-**`NuGet.config` pins the source to nuget.org.** Without it NuGet inherits every
-feed configured on the developer machine; a private Azure DevOps feed answers
-401 to GitHub Actions and restore fails with NU1301 even though local builds
-work off the package cache.
-
-**The unit waits for `time-sync.target`.** The WhiteBIT nonce is a millisecond
-timestamp covered by the request signature, so starting before NTP settles
-produces authentication failures that look exactly like bad credentials.
-
-Manual redeploy: Actions → Deploy → Run workflow.
-
-```bash
-sudo journalctl -u trader -f
-```

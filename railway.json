@@ -13,7 +13,7 @@
     ]
   },
   "deploy": {
-    "_comment_restart": "ALWAYS matches the systemd unit. The bot re-adopts open positions on startup, so a restart is recoverable; being down is not.",
+    "_comment_restart": "ALWAYS: the bot re-adopts open positions on startup, so a restart is recoverable; being down is not.",
     "restartPolicyType": "ALWAYS",
     "restartPolicyMaxRetries": 10,
 
