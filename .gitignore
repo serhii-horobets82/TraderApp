@@ -366,3 +366,4 @@ appsettings.local.json
 TraderApp/appsettings.local.json
 logs/
 **/logs/
+data/

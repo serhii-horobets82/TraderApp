@@ -142,6 +142,18 @@ Set `HaltOnConsecutiveLosses` to `false` if you prefer a cooldown
 (`LossCooldownMinutes`) instead of ending the session. Set
 `MaxDailyProfitPct` / `MaxPeakDrawdownPct` to `0` to disable those locks.
 
+**Halt persistence:** a hard halt is written to `data/session-state.json` and the
+process **parks** instead of exiting, so Railway's `restartPolicyType: ALWAYS`
+cannot wipe the halt by respawning with streak 0. After a redeploy, the new
+process restores the halt and parks again. To resume trading, set
+`TRADER_Risk__ClearHaltOnBoot=true` for one restart (then remove it), or delete
+the state file. Mount a volume on `/app/data` if you want the file to survive
+image rebuilds.
+
+`BreakEvenEnabled` (default off in live config) is honoured by both live and
+backtest exits — they share `ExitRules`. Trail starts at `TrailStartAtR` (1.5R)
+and dead trades scratch after `ScratchUnprofitableMinutes` (45).
+
 ---
 
 ## Configuration

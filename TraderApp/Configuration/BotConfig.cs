@@ -361,6 +361,24 @@ public sealed class RiskConfig
 
     /// <summary>Close everything and halt when the account reports margin_call or liquidation state.</summary>
     public bool FlattenOnMarginCall { get; set; } = true;
+
+    /// <summary>
+    /// Persist halt / loss-streak / daily entry counters to disk so a process
+    /// restart (Railway ALWAYS policy, crash, redeploy) cannot wipe a hard halt.
+    /// </summary>
+    public bool PersistSessionState { get; set; } = true;
+
+    /// <summary>
+    /// Path for the session-state file. Default is under the app directory.
+    /// Mount a Railway volume here if you want the halt to survive redeploys.
+    /// </summary>
+    public string SessionStatePath { get; set; } = "data/session-state.json";
+
+    /// <summary>
+    /// When true on boot, delete any persisted halt and start a fresh session.
+    /// Set TRADER_Risk__ClearHaltOnBoot=true after reviewing why it halted.
+    /// </summary>
+    public bool ClearHaltOnBoot { get; set; }
 }
 
 /// <summary>

@@ -1,5 +1,6 @@
 using TraderApp.Configuration;
 using TraderApp.Exchange;
+using TraderApp.Trading;
 
 namespace TraderApp.Risk;
 
@@ -15,6 +16,7 @@ public sealed class RiskManager
 {
     private readonly RiskConfig _cfg;
     private readonly TradingConfig _trading;
+    private readonly SessionStateStore _store;
 
     private readonly Dictionary<string, DateTime> _lastEntryPerMarket = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<DateTime> _entryTimestamps = new();
@@ -23,6 +25,7 @@ public sealed class RiskManager
     private int _entriesToday;
     private DateOnly _entriesDay;
     private DateTime? _cooldownUntil;
+    private DateTime? _haltedAtUtc;
 
     public decimal SessionStartEquity { get; private set; }
     public decimal PeakEquity { get; private set; }
@@ -31,17 +34,87 @@ public sealed class RiskManager
     public bool Halted { get; private set; }
     public string HaltReason { get; private set; } = "";
 
-    public RiskManager(RiskConfig cfg, TradingConfig trading)
+    public RiskManager(RiskConfig cfg, TradingConfig trading, SessionStateStore? store = null)
     {
         _cfg = cfg;
         _trading = trading;
+        _store = store ?? new SessionStateStore(cfg);
         _entriesDay = DateOnly.FromDateTime(DateTime.UtcNow);
+    }
+
+    /// <summary>
+    /// Restore a persisted halt / streak, or start a fresh equity session.
+    /// Call once at boot after reading live equity.
+    /// </summary>
+    public void RestoreOrInitialise(decimal equity)
+    {
+        if (_cfg.ClearHaltOnBoot)
+        {
+            _store.Clear();
+            Log.Risk("ClearHaltOnBoot=true — discarded persisted session state");
+            InitialiseEquity(equity);
+            return;
+        }
+
+        var saved = _store.TryLoad();
+        if (saved is null)
+        {
+            InitialiseEquity(equity);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(saved.EntriesDay) &&
+            DateOnly.TryParse(saved.EntriesDay, out var day))
+            _entriesDay = day;
+
+        _consecutiveLosses = Math.Max(0, saved.ConsecutiveLosses);
+        _entriesToday = Math.Max(0, saved.EntriesToday);
+
+        if (saved.CooldownUntilUtc is { } until && until > DateTime.UtcNow)
+            _cooldownUntil = until;
+
+        if (saved.Halted)
+        {
+            Halted = true;
+            HaltReason = string.IsNullOrWhiteSpace(saved.HaltReason)
+                ? "restored session halt"
+                : saved.HaltReason;
+            _haltedAtUtc = saved.HaltedAtUtc ?? DateTime.UtcNow;
+        }
+
+        if (saved.SessionStartEquity > 0)
+        {
+            SessionStartEquity = saved.SessionStartEquity;
+            PeakEquity = Math.Max(saved.PeakEquity, equity);
+        }
+        else
+        {
+            SessionStartEquity = equity;
+            PeakEquity = equity;
+        }
+
+        // Roll the day after halt flags are in place so Persist cannot wipe them.
+        RollDayIfNeeded(DateTime.UtcNow);
+
+        if (Halted)
+        {
+            Log.Risk($"restored HALTED state from {_store.FilePath}: {HaltReason} " +
+                     $"(loss streak {_consecutiveLosses}, entries today {_entriesToday})");
+        }
+        else if (_consecutiveLosses > 0 || _entriesToday > 0)
+        {
+            Log.Info($"restored session counters from {_store.FilePath}: " +
+                     $"loss streak {_consecutiveLosses}, entries today {_entriesToday}");
+        }
+
+        Persist();
     }
 
     public void InitialiseEquity(decimal equity)
     {
         SessionStartEquity = equity;
         PeakEquity = equity;
+        Persist();
     }
 
     public void Halt(string reason)
@@ -49,6 +122,8 @@ public sealed class RiskManager
         if (Halted) return;
         Halted = true;
         HaltReason = reason;
+        _haltedAtUtc = DateTime.UtcNow;
+        Persist();
     }
 
     /// <summary>
@@ -58,7 +133,11 @@ public sealed class RiskManager
     public bool CheckAccountHealth(decimal equity, IReadOnlyList<Position> positions, out string reason)
     {
         reason = "";
-        if (equity > PeakEquity) PeakEquity = equity;
+        if (equity > PeakEquity)
+        {
+            PeakEquity = equity;
+            Persist();
+        }
 
         if (SessionStartEquity > 0)
         {
@@ -118,12 +197,16 @@ public sealed class RiskManager
         if (profitable)
         {
             _consecutiveLosses = 0;
+            Persist();
             return;
         }
 
         _consecutiveLosses++;
         if (_consecutiveLosses < _cfg.MaxConsecutiveLosses)
+        {
+            Persist();
             return;
+        }
 
         if (_cfg.HaltOnConsecutiveLosses)
         {
@@ -134,6 +217,7 @@ public sealed class RiskManager
 
         _cooldownUntil = DateTime.UtcNow.AddMinutes(_cfg.LossCooldownMinutes);
         _consecutiveLosses = 0;
+        Persist();
     }
 
     public void RecordEntry(string market)
@@ -143,6 +227,7 @@ public sealed class RiskManager
         _lastEntryPerMarket[market] = now;
         _entryTimestamps.Enqueue(now);
         _entriesToday++;
+        Persist();
     }
 
     /// <summary>Gate checks that do not depend on sizing.</summary>
@@ -296,5 +381,22 @@ public sealed class RiskManager
         if (today == _entriesDay) return;
         _entriesDay = today;
         _entriesToday = 0;
+        Persist();
+    }
+
+    private void Persist()
+    {
+        _store.Save(new SessionState
+        {
+            Halted = Halted,
+            HaltReason = HaltReason,
+            HaltedAtUtc = _haltedAtUtc,
+            ConsecutiveLosses = _consecutiveLosses,
+            EntriesToday = _entriesToday,
+            EntriesDay = _entriesDay.ToString("yyyy-MM-dd"),
+            SessionStartEquity = SessionStartEquity,
+            PeakEquity = PeakEquity,
+            CooldownUntilUtc = _cooldownUntil,
+        });
     }
 }
