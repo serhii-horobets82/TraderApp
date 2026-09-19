@@ -7,7 +7,7 @@ using TraderApp.Signals;
 namespace TraderApp.Trading;
 
 /// <summary>Per-position bookkeeping the exchange does not keep for us.</summary>
-internal sealed class ManagedPosition
+internal sealed class ManagedPosition : ITradeState
 {
     public required long PositionId { get; init; }
     public required string Market { get; init; }
@@ -89,6 +89,27 @@ public sealed class AutoTrader : IAsyncDisposable
     {
         await BootstrapAsync(ct);
 
+        if (_risk.Halted)
+        {
+            try
+            {
+                var open = await _client.GetOpenPositionsAsync(null, ct);
+                if (open.Count > 0)
+                {
+                    Log.Risk($"halt active on boot — flattening {open.Count} open position(s)");
+                    await FlattenAllAsync(open, ct);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Log.Warn($"could not flatten on halted boot: {ex.Message}");
+            }
+
+            Log.Risk($"HALTED - {_risk.HaltReason}");
+            await ParkWhileHaltedAsync(ct);
+            return;
+        }
+
         while (!ct.IsCancellationRequested && !_risk.Halted)
         {
             try
@@ -113,7 +134,36 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         if (_risk.Halted)
+        {
             Log.Risk($"HALTED - {_risk.HaltReason}");
+            // Stay alive so Railway's ALWAYS restart policy cannot wipe the
+            // session halt by respawning a fresh process with streak 0.
+            await ParkWhileHaltedAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Idle loop after a hard halt. Heartbeats still fire so Telegram/watchdog
+    /// know the process is intentionally parked, not dead.
+    /// </summary>
+    private async Task ParkWhileHaltedAsync(CancellationToken ct)
+    {
+        Log.Risk("parking process until Ctrl+C / SIGTERM — " +
+                 "set TRADER_Risk__ClearHaltOnBoot=true to resume after restart");
+        _telegram?.Send($"🛑 HALTED — parked\n{_risk.HaltReason}\n" +
+                        "No new trades until ClearHaltOnBoot or state file cleared.");
+
+        var lastLog = DateTime.UtcNow;
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(30), ct); }
+            catch (OperationCanceledException) { break; }
+
+            if (DateTime.UtcNow - lastLog < TimeSpan.FromMinutes(15)) continue;
+            lastLog = DateTime.UtcNow;
+            Log.Risk($"still parked (halted): {_risk.HaltReason}");
+            MaybePingWatchdog();
+        }
     }
 
     // ── Startup ─────────────────────────────────────────────────────────
@@ -153,8 +203,13 @@ public sealed class AutoTrader : IAsyncDisposable
         await ApplyAccountFeesAsync(ct);
 
         var equity = summary?.Equity ?? 0m;
-        _risk.InitialiseEquity(equity);
+        _risk.RestoreOrInitialise(equity);
         Log.Info($"collateral equity {equity:F2} | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
+
+        if (_risk.Halted)
+        {
+            Log.Risk($"boot with active halt — will park after adopting open positions: {_risk.HaltReason}");
+        }
 
         if (equity <= 0)
             Log.Warn("collateral equity is zero - fund the collateral account before enabling live trading");
@@ -167,7 +222,8 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         _telegram?.Send(
-            $"{(_live ? "🟢" : "⚪")} Started · {(_live ? "LIVE" : "DRY RUN")}\n" +
+            $"{(_live ? "🟢" : "⚪")} Started · {(_live ? "LIVE" : "DRY RUN")}" +
+            $"{(_risk.Halted ? " · 🛑 HALTED" : "")}\n" +
             $"{BuildInfo.Display}\n" +
             $"Balance {equity:F2} USDT · {_cfg.Trading.Markets.Count} markets");
 
@@ -715,88 +771,23 @@ public sealed class AutoTrader : IAsyncDisposable
             m.CloseRequestedUtc = null;
         }
 
-        var sign = m.IsLong ? 1m : -1m;
-        var moveInFavour = (mark - m.EntryPrice) * sign;
+        var moveInFavour = (mark - m.EntryPrice) * (m.IsLong ? 1m : -1m);
         var r = m.EntryAtr * _cfg.Trading.StopLossAtrMult;
         var rMultiple = r > 0 ? moveInFavour / r : 0m;
         var floating = pos.FloatingPnl(mark);
+        var roundTrip = _risk.RoundTripFeePct(rules);
 
-        if (m.IsLong) m.HighWater = Math.Max(m.HighWater, mark);
-        else m.HighWater = m.HighWater == 0 ? mark : Math.Min(m.HighWater, mark);
+        // Shared with the backtester — live must honour BreakEvenEnabled etc.
+        var stopChange = ExitRules.UpdateStops(
+            m, mark, _cfg.Trading, roundTrip,
+            (price, isBuy) => rules.SnapPriceForSide(price, isBuy));
+        if (stopChange is not null)
+            Log.Trade($"{pos.Market}: {stopChange}");
 
-        if (rMultiple > m.MaxFavourableR) m.MaxFavourableR = rMultiple;
-
-        // 1. Break-even: once the trade has paid for itself, stop letting it lose.
-        //
-        // The break-even stop sits at entry + the round-trip fee, so in R terms
-        // it sits feeCushionR above entry - between 0.27R and 0.68R depending on
-        // the market's ATR. Triggering below that would place the stop ABOVE the
-        // current mark and close the trade instantly; triggering far above it
-        // (the old fixed 1.15R) means break-even almost never arms and every
-        // fade becomes a full fee loss. So the trigger is derived per market and
-        // the configured value acts only as a floor.
-        var stopDistancePrice = m.EntryAtr * _cfg.Trading.StopLossAtrMult;
-        var feeCushion = m.EntryPrice * (_risk.RoundTripFeePct(rules) / 100m);
-        var feeCushionR = stopDistancePrice > 0 ? feeCushion / stopDistancePrice : 0m;
-        var breakEvenTrigger = Math.Max(_cfg.Trading.BreakEvenAtR, feeCushionR + _cfg.Trading.BreakEvenBufferR);
-
-        if (!m.MovedToBreakEven && breakEvenTrigger > 0 && rMultiple >= breakEvenTrigger)
-        {
-            var be = rules.SnapPriceForSide(m.EntryPrice + sign * feeCushion, isBuy: !m.IsLong);
-            var improves = (m.IsLong && be > m.StopPrice) || (!m.IsLong && be < m.StopPrice);
-            var behindMark = (m.IsLong && be < mark) || (!m.IsLong && be > mark);
-
-            if (improves && behindMark)
-            {
-                m.StopPrice = be;
-                m.MovedToBreakEven = true;
-                Log.Trade($"{pos.Market}: stop moved to break-even+fees {rules.FormatPriceRaw(be)} " +
-                          $"at {rMultiple:F2}R (trigger {breakEvenTrigger:F2}R)");
-            }
-        }
-
-        // 2. Trailing stop, once the move has proven itself.
-        if (_cfg.Trading.TrailStartAtR > 0 && rMultiple >= _cfg.Trading.TrailStartAtR)
-        {
-            var trail = rules.SnapPriceForSide(
-                m.HighWater - sign * m.EntryAtr * _cfg.Trading.TrailAtrMult, isBuy: !m.IsLong);
-            if ((m.IsLong && trail > m.StopPrice) || (!m.IsLong && trail < m.StopPrice))
-            {
-                m.StopPrice = trail;
-                Log.Trade($"{pos.Market}: trailing stop -> {rules.FormatPriceRaw(trail)} ({rMultiple:F2}R)");
-            }
-        }
-
-        // 3. Exit conditions, in priority order.
-        string? exitReason = null;
-
-        if (m.IsLong && mark <= m.StopPrice) exitReason = $"stop hit ({mark} <= {m.StopPrice})";
-        else if (!m.IsLong && mark >= m.StopPrice) exitReason = $"stop hit ({mark} >= {m.StopPrice})";
-        else if (m.IsLong && mark >= m.TakeProfitPrice) exitReason = $"target hit ({mark} >= {m.TakeProfitPrice})";
-        else if (!m.IsLong && mark <= m.TakeProfitPrice) exitReason = $"target hit ({mark} <= {m.TakeProfitPrice})";
-        else if (pos.InTrouble) exitReason = $"liquidationState={pos.LiquidationState}";
-        else if (_cfg.Trading.MaxPositionMinutes > 0 &&
-                 DateTime.UtcNow - m.OpenedUtc > TimeSpan.FromMinutes(_cfg.Trading.MaxPositionMinutes))
-            exitReason = $"time stop after {_cfg.Trading.MaxPositionMinutes} minutes";
-        else if (_cfg.Trading.ScratchUnprofitableMinutes > 0 &&
-                 rMultiple < 0 &&
-                 m.MaxFavourableR < _cfg.Trading.ScratchMaxFavourableR &&
-                 DateTime.UtcNow - m.OpenedUtc > TimeSpan.FromMinutes(_cfg.Trading.ScratchUnprofitableMinutes))
-            // Only scratch a trade that never went anywhere. A trade that
-            // reached a decent excursion has its break-even stop armed, and
-            // closing it merely because it is fractionally red at an arbitrary
-            // minute pays the full round trip for nothing - which is exactly
-            // how ten consecutive "losses" were manufactured out of fees.
-            exitReason = $"never worked - {rMultiple:F2}R now, best {m.MaxFavourableR:F2}R " +
-                         $"in {_cfg.Trading.ScratchUnprofitableMinutes} minutes";
-        else if (_cfg.Trading.GiveBackArmR > 0 &&
-                 m.MaxFavourableR >= _cfg.Trading.GiveBackArmR &&
-                 rMultiple > 0 &&
-                 m.MaxFavourableR - rMultiple >= _cfg.Trading.GiveBackDropR &&
-                 moveInFavour / m.EntryPrice * 100m >= _risk.RoundTripFeePct(rules) * 1.3m)
-            exitReason = $"gave back peak {m.MaxFavourableR:F2}R to {rMultiple:F2}R";
-        else if (await ShouldExitAgainstRegimeAsync(pos, m, rMultiple, ct))
-            exitReason = "position fights the higher-timeframe regime while underwater";
+        var regimeAgainst = await ShouldExitAgainstRegimeAsync(pos, m, rMultiple, ct);
+        var exitReason = ExitRules.Decide(
+            m, mark, DateTime.UtcNow, _cfg.Trading, roundTrip,
+            pos.InTrouble, regimeAgainst);
 
         if (exitReason is null)
         {

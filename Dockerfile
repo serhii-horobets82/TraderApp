@@ -31,7 +31,7 @@ WORKDIR /app
 
 # The app only talks out over HTTPS; it never needs root.
 RUN useradd --create-home --shell /usr/sbin/nologin trader \
- && mkdir -p /app/logs \
+ && mkdir -p /app/logs /app/data \
  && chown -R trader:trader /app
 USER trader
 
