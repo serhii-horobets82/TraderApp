@@ -222,6 +222,139 @@ public class HardRiskRulesTests
             try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
         }
     }
+
+    [Fact]
+    public void Daily_profit_lock_auto_clears_on_utc_day_roll()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "traderapp-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "session-state.json");
+
+        try
+        {
+            var cfg = new RiskConfig
+            {
+                PersistSessionState = true,
+                SessionStatePath = path,
+                MaxDailyProfitPct = 1.5m,
+                MaxPeakDrawdownPct = 0m,
+                MaxDailyDrawdownPct = 50m,
+            };
+            var first = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            first.InitialiseEquity(200m);
+            Assert.True(first.CheckAccountHealth(203.2m, Array.Empty<Position>(), out var reason));
+            Assert.Contains("daily profit lock", reason);
+            Assert.True(first.Halted);
+            Assert.Equal(HaltKind.DailyProfit, first.Kind);
+            Assert.True(first.HaltClearsOnUtcDay);
+
+            // Pretend the lock was written yesterday so Restore sees a day roll.
+            var yesterday = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)).ToString("yyyy-MM-dd");
+            var json = File.ReadAllText(path);
+            json = System.Text.RegularExpressions.Regex.Replace(
+                json, "\"entriesDay\"\\s*:\\s*\"[^\"]+\"", $"\"entriesDay\": \"{yesterday}\"");
+            File.WriteAllText(path, json);
+
+            var second = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            second.RestoreOrInitialise(203.2m);
+            Assert.False(second.Halted);
+            Assert.Equal(HaltKind.None, second.Kind);
+            Assert.Equal(203.2m, second.SessionStartEquity);
+            Assert.True(second.CanOpenNewPosition("SUI_USDT", Array.Empty<Position>(), out _));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void Consecutive_loss_halt_survives_utc_day_roll()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "traderapp-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "session-state.json");
+
+        try
+        {
+            var cfg = new RiskConfig
+            {
+                PersistSessionState = true,
+                SessionStatePath = path,
+                MaxConsecutiveLosses = 2,
+                HaltOnConsecutiveLosses = true,
+            };
+            var first = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            first.InitialiseEquity(200m);
+            first.RecordTradeResult(false, -1m);
+            first.RecordTradeResult(false, -1m);
+            Assert.True(first.Halted);
+            Assert.Equal(HaltKind.ConsecutiveLosses, first.Kind);
+            Assert.False(first.HaltClearsOnUtcDay);
+
+            var yesterday = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)).ToString("yyyy-MM-dd");
+            var json = File.ReadAllText(path);
+            json = System.Text.RegularExpressions.Regex.Replace(
+                json, "\"entriesDay\"\\s*:\\s*\"[^\"]+\"", $"\"entriesDay\": \"{yesterday}\"");
+            File.WriteAllText(path, json);
+
+            var second = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            second.RestoreOrInitialise(200m);
+            Assert.True(second.Halted);
+            Assert.Equal(HaltKind.ConsecutiveLosses, second.Kind);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void TickUtcDay_rebaselines_session_equity_when_not_halted()
+    {
+        var rm = Create(c =>
+        {
+            c.MaxDailyProfitPct = 1.5m;
+            c.MaxPeakDrawdownPct = 0m;
+        });
+        rm.InitialiseEquity(200m);
+
+        // Force a day roll by restoring from a crafted store via a second manager.
+        var dir = Path.Combine(Path.GetTempPath(), "traderapp-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "session-state.json");
+        try
+        {
+            var cfg = new RiskConfig
+            {
+                PersistSessionState = true,
+                SessionStatePath = path,
+                MaxDailyProfitPct = 1.5m,
+                MaxPeakDrawdownPct = 0m,
+                MaxDailyDrawdownPct = 50m,
+            };
+            var first = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            first.InitialiseEquity(200m);
+            // Grow peak without locking.
+            Assert.False(first.CheckAccountHealth(202m, Array.Empty<Position>(), out _));
+
+            var yesterday = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-1)).ToString("yyyy-MM-dd");
+            var json = File.ReadAllText(path);
+            json = System.Text.RegularExpressions.Regex.Replace(
+                json, "\"entriesDay\"\\s*:\\s*\"[^\"]+\"", $"\"entriesDay\": \"{yesterday}\"");
+            File.WriteAllText(path, json);
+
+            var second = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            second.RestoreOrInitialise(210m);
+            Assert.False(second.Halted);
+            Assert.Equal(210m, second.SessionStartEquity);
+            Assert.Equal(210m, second.PeakEquity);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
 }
 
 public class ExitRulesBreakEvenTests

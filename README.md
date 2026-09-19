@@ -145,7 +145,11 @@ Set `HaltOnConsecutiveLosses` to `false` if you prefer a cooldown
 **Halt persistence:** a hard halt is written to `data/session-state.json` and the
 process **parks** instead of exiting, so Railway's `restartPolicyType: ALWAYS`
 cannot wipe the halt by respawning with streak 0. After a redeploy, the new
-process restores the halt and parks again. To resume trading, set
+process restores the halt and parks again.
+
+Day-scoped locks (**daily profit**, session drawdown, peak drawdown) **auto-resume
+at the next UTC midnight** — the park loop re-baselines session equity and
+clears the halt. Consecutive-loss and margin-call halts stay until you set
 `TRADER_Risk__ClearHaltOnBoot=true` for one restart (then remove it), or delete
 the state file. Mount a volume on `/app/data` if you want the file to survive
 image rebuilds.

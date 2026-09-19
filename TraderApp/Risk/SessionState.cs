@@ -9,6 +9,7 @@ public sealed class SessionState
 {
     public bool Halted { get; set; }
     public string HaltReason { get; set; } = "";
+    public string HaltKind { get; set; } = "";
     public DateTime? HaltedAtUtc { get; set; }
     public int ConsecutiveLosses { get; set; }
     public int EntriesToday { get; set; }
