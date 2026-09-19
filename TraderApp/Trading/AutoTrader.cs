@@ -89,79 +89,106 @@ public sealed class AutoTrader : IAsyncDisposable
     {
         await BootstrapAsync(ct);
 
-        if (_risk.Halted)
+        while (!ct.IsCancellationRequested)
         {
-            try
+            if (_risk.Halted)
             {
-                var open = await _client.GetOpenPositionsAsync(null, ct);
-                if (open.Count > 0)
+                try
                 {
-                    Log.Risk($"halt active on boot — flattening {open.Count} open position(s)");
-                    await FlattenAllAsync(open, ct);
+                    var open = await _client.GetOpenPositionsAsync(null, ct);
+                    if (open.Count > 0)
+                    {
+                        Log.Risk($"halt active — flattening {open.Count} open position(s)");
+                        await FlattenAllAsync(open, ct);
+                    }
                 }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                Log.Warn($"could not flatten on halted boot: {ex.Message}");
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Log.Warn($"could not flatten while halted: {ex.Message}");
+                }
+
+                Log.Risk($"HALTED - {_risk.HaltReason}");
+                await ParkWhileHaltedAsync(ct);
+                if (_risk.Halted || ct.IsCancellationRequested)
+                    return;
+
+                Log.Risk("resumed trading after UTC day rollover");
+                _telegram?.Send($"▶️ Resumed · new UTC day\nBalance lock cleared — trading again.");
+                continue;
             }
 
-            Log.Risk($"HALTED - {_risk.HaltReason}");
-            await ParkWhileHaltedAsync(ct);
-            return;
-        }
+            while (!ct.IsCancellationRequested && !_risk.Halted)
+            {
+                try
+                {
+                    await TickAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (ApiException ex)
+                {
+                    Log.Error($"API: {ex.Message}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error($"tick failed: {ex}");
+                }
 
-        while (!ct.IsCancellationRequested && !_risk.Halted)
-        {
-            try
-            {
-                await TickAsync(ct);
+                try { await Task.Delay(_cfg.Trading.LoopIntervalMs, ct); }
+                catch (OperationCanceledException) { return; }
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (ApiException ex)
-            {
-                Log.Error($"API: {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                Log.Error($"tick failed: {ex}");
-            }
-
-            try { await Task.Delay(_cfg.Trading.LoopIntervalMs, ct); }
-            catch (OperationCanceledException) { break; }
-        }
-
-        if (_risk.Halted)
-        {
-            Log.Risk($"HALTED - {_risk.HaltReason}");
-            // Stay alive so Railway's ALWAYS restart policy cannot wipe the
-            // session halt by respawning a fresh process with streak 0.
-            await ParkWhileHaltedAsync(ct);
         }
     }
 
     /// <summary>
-    /// Idle loop after a hard halt. Heartbeats still fire so Telegram/watchdog
-    /// know the process is intentionally parked, not dead.
+    /// Idle loop after a hard halt. Day-scoped locks (daily profit / session
+    /// drawdown) auto-resume at the next UTC midnight. Hard halts
+    /// (consecutive losses, margin call) stay until ClearHaltOnBoot.
     /// </summary>
     private async Task ParkWhileHaltedAsync(CancellationToken ct)
     {
-        Log.Risk("parking process until Ctrl+C / SIGTERM — " +
-                 "set TRADER_Risk__ClearHaltOnBoot=true to resume after restart");
-        _telegram?.Send($"🛑 HALTED — parked\n{_risk.HaltReason}\n" +
-                        "No new trades until ClearHaltOnBoot or state file cleared.");
+        var dayScoped = _risk.HaltClearsOnUtcDay;
+        if (dayScoped)
+        {
+            Log.Risk("parking until next UTC day (day-scoped lock) — or ClearHaltOnBoot to resume now");
+            _telegram?.Send($"🛑 HALTED — parked until UTC midnight\n{_risk.HaltReason}\n" +
+                            "Auto-resumes on the next UTC day. ClearHaltOnBoot to resume sooner.");
+        }
+        else
+        {
+            Log.Risk("parking process until Ctrl+C / SIGTERM — " +
+                     "set TRADER_Risk__ClearHaltOnBoot=true to resume after restart");
+            _telegram?.Send($"🛑 HALTED — parked\n{_risk.HaltReason}\n" +
+                            "No new trades until ClearHaltOnBoot or state file cleared.");
+        }
 
         var lastLog = DateTime.UtcNow;
-        while (!ct.IsCancellationRequested)
+        while (!ct.IsCancellationRequested && _risk.Halted)
         {
             try { await Task.Delay(TimeSpan.FromSeconds(30), ct); }
             catch (OperationCanceledException) { break; }
 
+            try
+            {
+                var summary = await _client.GetCollateralSummaryAsync(ct);
+                var equity = summary?.Equity ?? 0m;
+                if (_risk.TickUtcDay(equity))
+                {
+                    Log.Risk("day-scoped halt cleared — leaving park");
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Log.Warn($"park equity check failed: {ex.Message}");
+            }
+
             if (DateTime.UtcNow - lastLog < TimeSpan.FromMinutes(15)) continue;
             lastLog = DateTime.UtcNow;
-            Log.Risk($"still parked (halted): {_risk.HaltReason}");
+            Log.Risk($"still parked (halted): {_risk.HaltReason}" +
+                     (dayScoped ? " — waits for UTC day rollover" : ""));
             MaybePingWatchdog();
         }
     }

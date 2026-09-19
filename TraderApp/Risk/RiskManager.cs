@@ -26,6 +26,7 @@ public sealed class RiskManager
     private DateOnly _entriesDay;
     private DateTime? _cooldownUntil;
     private DateTime? _haltedAtUtc;
+    private HaltKind _haltKind;
 
     public decimal SessionStartEquity { get; private set; }
     public decimal PeakEquity { get; private set; }
@@ -33,6 +34,8 @@ public sealed class RiskManager
     public int EntriesToday => _entriesToday;
     public bool Halted { get; private set; }
     public string HaltReason { get; private set; } = "";
+    public HaltKind Kind => _haltKind;
+    public bool HaltClearsOnUtcDay => HaltKindRules.ClearsOnUtcDay(_haltKind);
 
     public RiskManager(RiskConfig cfg, TradingConfig trading, SessionStateStore? store = null)
     {
@@ -79,6 +82,10 @@ public sealed class RiskManager
             HaltReason = string.IsNullOrWhiteSpace(saved.HaltReason)
                 ? "restored session halt"
                 : saved.HaltReason;
+            _haltKind = HaltKindRules.Parse(saved.HaltKind);
+            // Older state files had no kind — infer from the reason text.
+            if (_haltKind == HaltKind.None)
+                _haltKind = InferKind(HaltReason);
             _haltedAtUtc = saved.HaltedAtUtc ?? DateTime.UtcNow;
         }
 
@@ -94,7 +101,7 @@ public sealed class RiskManager
         }
 
         // Roll the day after halt flags are in place so Persist cannot wipe them.
-        RollDayIfNeeded(DateTime.UtcNow);
+        TickUtcDay(equity);
 
         if (Halted)
         {
@@ -117,11 +124,12 @@ public sealed class RiskManager
         Persist();
     }
 
-    public void Halt(string reason)
+    public void Halt(string reason, HaltKind kind = HaltKind.None)
     {
         if (Halted) return;
         Halted = true;
         HaltReason = reason;
+        _haltKind = kind == HaltKind.None ? InferKind(reason) : kind;
         _haltedAtUtc = DateTime.UtcNow;
         Persist();
     }
@@ -133,6 +141,8 @@ public sealed class RiskManager
     public bool CheckAccountHealth(decimal equity, IReadOnlyList<Position> positions, out string reason)
     {
         reason = "";
+        TickUtcDay(equity);
+
         if (equity > PeakEquity)
         {
             PeakEquity = equity;
@@ -146,7 +156,7 @@ public sealed class RiskManager
             {
                 reason = $"session drawdown {sessionDdPct:F2}% reached the {_cfg.MaxDailyDrawdownPct}% limit " +
                          $"(equity {equity:F2} vs start {SessionStartEquity:F2})";
-                Halt(reason);
+                Halt(reason, HaltKind.SessionDrawdown);
                 return true;
             }
 
@@ -157,7 +167,7 @@ public sealed class RiskManager
                 {
                     reason = $"daily profit lock hit {profitPct:F2}% (cap {_cfg.MaxDailyProfitPct}%) — " +
                              $"locking the green day at equity {equity:F2}";
-                    Halt(reason);
+                    Halt(reason, HaltKind.DailyProfit);
                     return true;
                 }
             }
@@ -170,7 +180,7 @@ public sealed class RiskManager
             {
                 reason = $"peak drawdown {peakDdPct:F2}% reached the {_cfg.MaxPeakDrawdownPct}% limit " +
                          $"(equity {equity:F2} vs peak {PeakEquity:F2})";
-                Halt(reason);
+                Halt(reason, HaltKind.PeakDrawdown);
                 return true;
             }
         }
@@ -181,7 +191,7 @@ public sealed class RiskManager
             if (bad is not null)
             {
                 reason = $"{bad.Market} reported liquidationState={bad.LiquidationState}";
-                Halt(reason);
+                Halt(reason, HaltKind.MarginCall);
                 return true;
             }
         }
@@ -211,7 +221,7 @@ public sealed class RiskManager
         if (_cfg.HaltOnConsecutiveLosses)
         {
             Halt($"{_consecutiveLosses} consecutive losses — hard session halt " +
-                 $"(limit {_cfg.MaxConsecutiveLosses})");
+                 $"(limit {_cfg.MaxConsecutiveLosses})", HaltKind.ConsecutiveLosses);
             return;
         }
 
@@ -375,13 +385,71 @@ public sealed class RiskManager
         return new SizingResult(true, amount, stop, take, hardStop, "ok");
     }
 
+    /// <summary>
+    /// UTC day boundary: reset the daily entry counter, re-baseline session
+    /// equity for the profit/drawdown locks, and clear day-scoped halts
+    /// (daily profit, session/peak drawdown). Hard halts stay until
+    /// ClearHaltOnBoot.
+    /// </summary>
+    /// <returns>True when a day-scoped halt was cleared and trading may resume.</returns>
+    public bool TickUtcDay(decimal equity)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (today == _entriesDay) return false;
+
+        var previous = _entriesDay;
+        _entriesDay = today;
+        _entriesToday = 0;
+
+        if (equity > 0)
+        {
+            SessionStartEquity = equity;
+            PeakEquity = equity;
+        }
+
+        var cleared = false;
+        if (Halted && HaltKindRules.ClearsOnUtcDay(_haltKind))
+        {
+            Log.Risk($"UTC day rolled ({previous} → {today}) — clearing day-scoped halt: {HaltReason}");
+            Halted = false;
+            HaltReason = "";
+            _haltKind = HaltKind.None;
+            _haltedAtUtc = null;
+            cleared = true;
+        }
+        else
+        {
+            Log.Info($"UTC day rolled ({previous} → {today}) — session equity re-baselined at {equity:F2}");
+        }
+
+        Persist();
+        return cleared;
+    }
+
     private void RollDayIfNeeded(DateTime utcNow)
     {
+        // Entry-gate path without a fresh equity reading: only roll the counter.
+        // Full baseline reset happens in TickUtcDay / CheckAccountHealth.
         var today = DateOnly.FromDateTime(utcNow);
         if (today == _entriesDay) return;
         _entriesDay = today;
         _entriesToday = 0;
         Persist();
+    }
+
+    private static HaltKind InferKind(string reason)
+    {
+        if (reason.Contains("daily profit lock", StringComparison.OrdinalIgnoreCase))
+            return HaltKind.DailyProfit;
+        if (reason.Contains("session drawdown", StringComparison.OrdinalIgnoreCase))
+            return HaltKind.SessionDrawdown;
+        if (reason.Contains("peak drawdown", StringComparison.OrdinalIgnoreCase))
+            return HaltKind.PeakDrawdown;
+        if (reason.Contains("consecutive losses", StringComparison.OrdinalIgnoreCase))
+            return HaltKind.ConsecutiveLosses;
+        if (reason.Contains("liquidation", StringComparison.OrdinalIgnoreCase))
+            return HaltKind.MarginCall;
+        return HaltKind.None;
     }
 
     private void Persist()
@@ -390,6 +458,7 @@ public sealed class RiskManager
         {
             Halted = Halted,
             HaltReason = HaltReason,
+            HaltKind = _haltKind.ToString(),
             HaltedAtUtc = _haltedAtUtc,
             ConsecutiveLosses = _consecutiveLosses,
             EntriesToday = _entriesToday,
