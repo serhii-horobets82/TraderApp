@@ -28,6 +28,16 @@ public sealed record TradeSignal
 
     public bool IsActionable => Direction != Direction.None && Vetoes.Count == 0;
 
+    /// <summary>
+    /// Spread and book can clear on the next tick; candle vetoes cannot.
+    /// Used to retry a setup mid-bar without re-logging a dead 15m signal.
+    /// </summary>
+    public bool OnlyMicrostructureVetoes =>
+        Vetoes.Count > 0 && Vetoes.All(v =>
+            v.StartsWith("spread ", StringComparison.Ordinal) ||
+            v.StartsWith("book ", StringComparison.Ordinal) ||
+            v.Equals("empty order book side", StringComparison.Ordinal));
+
     public string Explain()
     {
         var agree = Components.Where(c => c.Direction == Direction).Select(c => c.Name);
@@ -292,11 +302,12 @@ public sealed class SignalEngine
 
         if (chosen != Direction.None)
         {
-            // Win-rate filter: never fade a decided higher-timeframe. Flat HTF
-            // is also skipped - those were the coin-flip chop entries.
-            if (regime == Direction.None)
+            // Never fade a decided 1h. A flat 1h is chop, not a veto — RSI/BB
+            // mean-reversion is the setup we want there. RequireDecidedHtf
+            // restores the old "wait for a decided 1h" lock if you want it.
+            if (regime == Direction.None && _cfg.RequireDecidedHtf)
                 vetoes.Add("no higher-timeframe regime - wait for a decided 1h");
-            else if (regime != chosen)
+            else if (regime != Direction.None && regime != chosen)
                 vetoes.Add($"direction {chosen} fights the {regimeLabel} regime");
             if (score < _cfg.MinScore)
                 vetoes.Add($"score {score:F2} < {_cfg.MinScore:F2}");
@@ -338,7 +349,10 @@ public sealed class SignalEngine
                     vetoes.Add($"EMA fights a trend {chosen.ToString().ToLowerInvariant()}");
             }
 
-            if (imbDir != Direction.None && imbDir != chosen)
+            var bookVetoMin = _cfg.BookVetoMinImbalance > 0
+                ? _cfg.BookVetoMinImbalance
+                : _cfg.ImbalanceThreshold;
+            if (imbDir != Direction.None && imbDir != chosen && Math.Abs(imb) >= bookVetoMin)
                 vetoes.Add($"book {imbDir} fights the {chosen} setup");
 
             if (_cfg.RequireMacdAlign && i > 0 && Ta.IsUsable(macd.Histogram[i]))

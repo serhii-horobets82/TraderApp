@@ -183,7 +183,7 @@ The settings worth knowing:
 | `Risk.MaxTradesPerHour` / `MaxTradesPerDay` | `6` / `16` | Overtrading budget |
 | `Risk.HaltOnConsecutiveLosses` | `true` | 10 losses → session halt (else cooldown) |
 | `Trading.LoopIntervalMs` | `2000` | Decision loop period |
-| `Trading.StatusLogEveryTicks` | `5` | Status / blocked-setup log cadence (~10s) |
+| `Trading.StatusLogEveryTicks` | `20` | Equity status cadence (~40s). Blocked setups log once per new 15m bar |
 | `Signals.MinScore` | `0.58` | Raise for fewer, higher-conviction trades |
 | `Signals.RequireMacdAlign` | `false` | When true, MACD histogram must agree with direction |
 

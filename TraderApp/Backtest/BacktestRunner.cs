@@ -191,6 +191,8 @@ public static class BacktestRunner
             MinVolumeRatio = c.Signals.MinVolumeRatio,
             MaxTrendRsiLong = c.Signals.MaxTrendRsiLong, MinTrendRsiShort = c.Signals.MinTrendRsiShort,
             RequireMacdAlign = c.Signals.RequireMacdAlign,
+            RequireDecidedHtf = c.Signals.RequireDecidedHtf,
+            BookVetoMinImbalance = c.Signals.BookVetoMinImbalance,
             AdxTrendThreshold = c.Signals.AdxTrendThreshold,
             RsiOversold = c.Signals.RsiOversold, RsiOverbought = c.Signals.RsiOverbought,
             RsiExtremeHigh = c.Signals.RsiExtremeHigh, RsiExtremeLow = c.Signals.RsiExtremeLow,

@@ -213,6 +213,7 @@ internal static class Program
         Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
         Console.WriteLine($"  Loop          : every {c.Trading.LoopIntervalMs}ms, status every {c.Trading.StatusLogEveryTicks} ticks");
         Console.WriteLine($"  MACD align    : {(c.Signals.RequireMacdAlign ? "required" : "optional")}");
+        Console.WriteLine($"  HTF flat      : {(c.Signals.RequireDecidedHtf ? "blocks entries" : "allows chop setups")}");
         Console.WriteLine("  Ctrl+C to stop.");
         Console.WriteLine();
     }

@@ -73,6 +73,8 @@ public sealed class AutoTrader : IAsyncDisposable
     private DateTime _lastHeartbeatUtc = DateTime.UtcNow;
     private DateTime _lastWatchdogUtc = DateTime.MinValue;
     private readonly Dictionary<string, DateTime> _lastSizingRejectLog = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _lastEntryVetoKey = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _closedEntryBarOpen = DateTime.MinValue;
     private int _tick;
 
     public AutoTrader(BotConfig cfg, WhiteBitClient client, Notifications.TelegramNotifier? telegram = null)
@@ -469,6 +471,8 @@ public sealed class AutoTrader : IAsyncDisposable
             return;
         }
 
+        var newClosedBar = await NoteClosedEntryBarAsync(ct);
+
         var candidates = new List<ScannedEntry>();
         var scans = new List<Task<ScannedEntry?>>();
         foreach (var market in _cfg.Trading.Markets)
@@ -476,11 +480,16 @@ public sealed class AutoTrader : IAsyncDisposable
             if (ct.IsCancellationRequested) break;
             if (!_risk.CanOpenNewPosition(market, positions, out var blockReason, _pending.Count, reserved))
             {
-                if (ShouldStatusLog()) Log.Info($"{market}: no entry - {blockReason}");
+                if (newClosedBar) Log.Info($"{market}: no entry - {blockReason}");
                 continue;
             }
 
-            scans.Add(ScanEntrySafeAsync(market, equity, openNotional, ct));
+            if (!newClosedBar &&
+                _lastEntryVetoKey.TryGetValue(market, out var prior) &&
+                prior != "micro")
+                continue;
+
+            scans.Add(ScanEntrySafeAsync(market, equity, openNotional, newClosedBar, ct));
         }
 
         foreach (var scanned in await Task.WhenAll(scans))
@@ -516,12 +525,31 @@ public sealed class AutoTrader : IAsyncDisposable
         return open + pending < cap;
     }
 
+    /// <summary>
+    /// Signals are closed-bar. Re-scoring the same 15m candle every 2s only
+    /// reprints the same vetoes and lets the book flicker a fake "almost".
+    /// </summary>
+    private async Task<bool> NoteClosedEntryBarAsync(CancellationToken ct)
+    {
+        var probe = _cfg.Trading.Markets.FirstOrDefault();
+        if (probe is null) return true;
+        var candles = await _client.GetKlinesAsync(
+            probe, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
+        if (candles.Count == 0) return true;
+        var open = candles[^1].OpenTime;
+        if (open == _closedEntryBarOpen) return false;
+        _closedEntryBarOpen = open;
+        _lastEntryVetoKey.Clear();
+        Log.Info($"new {_cfg.Trading.EntryInterval} bar {open:HH:mm} UTC — scanning entries");
+        return true;
+    }
+
     private async Task<ScannedEntry?> ScanEntrySafeAsync(
-        string market, decimal equity, decimal openNotional, CancellationToken ct)
+        string market, decimal equity, decimal openNotional, bool logBlocked, CancellationToken ct)
     {
         try
         {
-            return await ScanEntryAsync(market, equity, openNotional, ct);
+            return await ScanEntryAsync(market, equity, openNotional, logBlocked, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -531,7 +559,7 @@ public sealed class AutoTrader : IAsyncDisposable
     }
 
     private async Task<ScannedEntry?> ScanEntryAsync(
-        string market, decimal equity, decimal openNotional, CancellationToken ct)
+        string market, decimal equity, decimal openNotional, bool logBlocked, CancellationToken ct)
     {
         if (!_rules.TryGetValue(market, out var rules)) return null;
 
@@ -550,9 +578,14 @@ public sealed class AutoTrader : IAsyncDisposable
 
         if (!signal.IsActionable)
         {
-            if (ShouldStatusLog()) Log.Info($"{market}: {signal.Explain()}");
+            var key = signal.OnlyMicrostructureVetoes ? "micro" : signal.Explain();
+            var changed = !_lastEntryVetoKey.TryGetValue(market, out var prev) || prev != key;
+            _lastEntryVetoKey[market] = key;
+            if (logBlocked || changed) Log.Info($"{market}: {signal.Explain()}");
             return null;
         }
+
+        _lastEntryVetoKey[market] = "ok";
 
         var isLong = signal.Direction == Signals.Direction.Long;
 

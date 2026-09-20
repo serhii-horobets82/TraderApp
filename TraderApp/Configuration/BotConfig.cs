@@ -250,6 +250,18 @@ public sealed class SignalConfig
     /// </summary>
     public bool RequireMacdAlign { get; set; } = true;
 
+    /// <summary>
+    /// When true, a flat 1h EMA50 blocks every entry. When false (default),
+    /// only a decided opposite 1h is a veto — chop can still mean-revert.
+    /// </summary>
+    public bool RequireDecidedHtf { get; set; }
+
+    /// <summary>
+    /// Book must lean this hard against the setup before it vetoes.
+    /// Below this the book can still vote, but a 12% flicker will not kill a 15m signal.
+    /// </summary>
+    public double BookVetoMinImbalance { get; set; } = 0.20;
+
     /// <summary>ADX above this counts as a trending regime; below it, as chop.</summary>
     public double AdxTrendThreshold { get; set; } = 22;
 
