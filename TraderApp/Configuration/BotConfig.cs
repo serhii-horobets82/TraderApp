@@ -45,6 +45,14 @@ public sealed class BotConfig
             errors.Add("Signals.MinScore must be in [0.3, 1.0].");
         if (Trading.TakeProfitAtrMult <= Trading.StopLossAtrMult * 0.8m)
             errors.Add("Trading.TakeProfitAtrMult should be at least 0.8x StopLossAtrMult, otherwise the win rate required to break even is unrealistic.");
+        if (Trading.PartialTakeAtR < 0 || (Trading.PartialTakeAtR > 0 && Trading.PartialTakeFraction is <= 0 or >= 1))
+            errors.Add("Trading.PartialTakeFraction must be in (0, 1) when PartialTakeAtR is set.");
+        if (Trading.EntryHoursUtcStart is < 0 or > 23 || Trading.EntryHoursUtcEnd is < 0 or > 24)
+            errors.Add("Trading.EntryHoursUtcStart must be 0-23 and EntryHoursUtcEnd 0-24.");
+        if (Risk.ProfitLockRiskScale is < 0 or > 1)
+            errors.Add("Risk.ProfitLockRiskScale must be in [0, 1]. 0 halts on the profit lock.");
+        if (Risk.WeekendRiskScale is <= 0 or > 1)
+            errors.Add("Risk.WeekendRiskScale must be in (0, 1].");
         if (Telegram.Enabled && string.IsNullOrWhiteSpace(Telegram.BotToken))
             errors.Add("Telegram.Enabled is true but Telegram.BotToken is empty. Set TRADER_Telegram__BotToken or TELEGRAM_BOT_TOKEN.");
         if (Telegram.Enabled && !string.IsNullOrWhiteSpace(Telegram.ChatId)
@@ -191,6 +199,31 @@ public sealed class TradingConfig
 
     /// <summary>Cancel an unfilled entry order after this many seconds.</summary>
     public int EntryOrderTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Take part of the position off once the trade reaches this R (0 disables).
+    /// The remainder gets a break-even+fees stop and keeps running to the target
+    /// or trail, so the win rate rises without giving up the long tail.
+    /// </summary>
+    public decimal PartialTakeAtR { get; set; } = 0m;
+
+    /// <summary>Fraction of the position closed at PartialTakeAtR. Both halves must clear the market minimums.</summary>
+    public decimal PartialTakeFraction { get; set; } = 0.5m;
+
+    /// <summary>
+    /// UTC hour window for NEW entries, inclusive start, exclusive end. Equal
+    /// values disable the filter. Open positions are managed at any hour.
+    /// Alt books on WhiteBIT are thin outside EU/US hours and spreads widen.
+    /// </summary>
+    public int EntryHoursUtcStart { get; set; } = 0;
+    public int EntryHoursUtcEnd { get; set; } = 0;
+
+    /// <summary>
+    /// JSON-lines file with one record per closed trade, including the entry
+    /// context (components, ATR%, funding, hour, BTC regime). Empty disables.
+    /// The daily Telegram digest is built from this file.
+    /// </summary>
+    public string TradeJournalPath { get; set; } = "data/trades.jsonl";
 }
 
 public sealed class SignalConfig
@@ -262,6 +295,24 @@ public sealed class SignalConfig
     /// </summary>
     public double BookVetoMinImbalance { get; set; } = 0.20;
 
+    /// <summary>
+    /// Stand aside on crowded perp funding or a fresh BTC 1h flip against the alt.
+    /// These are vetoes, not votes — they never open a trade.
+    /// </summary>
+    public bool StandAsideEnabled { get; set; } = true;
+
+    /// <summary>Spot market whose 1h regime is the risk-on/off switch. Usually BTC_USDT.</summary>
+    public string AnchorMarket { get; set; } = "BTC_USDT";
+
+    /// <summary>Interval for the anchor regime. Empty uses Trading.RegimeInterval.</summary>
+    public string AnchorInterval { get; set; } = "1h";
+
+    /// <summary>
+    /// Predicted perp funding (decimal, 0.0002 = 0.02%) at which we refuse the
+    /// crowded side. Longs pay when funding is positive. 0 disables the funding veto.
+    /// </summary>
+    public decimal MaxFundingRate { get; set; } = 0.0002m;
+
     /// <summary>ADX above this counts as a trending regime; below it, as chop.</summary>
     public double AdxTrendThreshold { get; set; } = 22;
 
@@ -295,6 +346,13 @@ public sealed class SignalConfig
 
     /// <summary>Refuse to trade when ATR% of price is above this - news or panic volatility.</summary>
     public decimal MaxAtrPct { get; set; } = 3.5m;
+
+    /// <summary>
+    /// Refuse to trade when the thinner side of the book (top OrderBookDepth
+    /// levels) holds less than this many USDT. A depth check catches an
+    /// illiquid market on any name before the spread veto does. 0 disables.
+    /// </summary>
+    public decimal MinBookDepthUsd { get; set; } = 0m;
 }
 
 public sealed class RiskConfig
@@ -330,6 +388,21 @@ public sealed class RiskConfig
     /// (0 disables). Locks a small green day instead of giving it back.
     /// </summary>
     public decimal MaxDailyProfitPct { get; set; } = 1.5m;
+
+    /// <summary>
+    /// What the profit lock does. 0 = halt for the UTC day (original
+    /// behaviour). Greater than 0 = keep trading with RiskPerTradePct and the
+    /// notional caps scaled by this factor for the rest of the day, so a green
+    /// day can still compound while a give-back stays small. Peak drawdown
+    /// still protects the gains.
+    /// </summary>
+    public decimal ProfitLockRiskScale { get; set; } = 0m;
+
+    /// <summary>
+    /// Risk scale applied on Saturday and Sunday UTC (1 = no change).
+    /// Weekend crypto volume is thinner and moves are more often fee-only.
+    /// </summary>
+    public decimal WeekendRiskScale { get; set; } = 1m;
 
     /// <summary>Stop opening new positions after this many losses in a row.</summary>
     public int MaxConsecutiveLosses { get; set; } = 10;
@@ -432,6 +505,9 @@ public sealed class TelegramConfig
 
     /// <summary>Periodic status message with equity and open positions. 0 disables.</summary>
     public int HeartbeatMinutes { get; set; } = 60;
+
+    /// <summary>One summary of the previous UTC day's trades at midnight, from the trade journal.</summary>
+    public bool DailyDigest { get; set; } = true;
 
     /// <summary>
     /// GET this URL on a timer (healthchecks.io ping URL). If the process dies

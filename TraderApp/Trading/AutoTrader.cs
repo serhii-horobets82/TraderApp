@@ -35,12 +35,22 @@ internal sealed class ManagedPosition : ITradeState
 
     /// <summary>Why the bot decided to close, kept for the close notification.</summary>
     public string LastExitReason { get; set; } = "";
+
+    /// <summary>Size when first managed, so the journal's R-multiple uses the original risk.</summary>
+    public decimal InitialSize { get; init; }
+
+    /// <summary>Set once the partial take-profit has been placed (or ruled out for this trade).</summary>
+    public bool PartialTaken { get; set; }
+
+    /// <summary>What the signal looked like at entry. Null for adopted positions.</summary>
+    public EntryContext? Entry { get; init; }
 }
 
 internal sealed record PendingEntry(long OrderId, string Market, bool IsLong, DateTime PlacedUtc);
 
 /// <summary>A position that has closed but whose realised PnL has not been read back yet.</summary>
-internal sealed record ClosedTrade(long PositionId, string Market, bool IsLong, DateTime ClosedUtc, string ExitReason);
+internal sealed record ClosedTrade(
+    long PositionId, string Market, bool IsLong, DateTime ClosedUtc, string ExitReason, ManagedPosition State);
 
 /// <summary>
 /// The auto-trading loop.
@@ -60,6 +70,7 @@ public sealed class AutoTrader : IAsyncDisposable
     private readonly BotConfig _cfg;
     private readonly WhiteBitClient _client;
     private readonly SignalEngine _signals;
+    private readonly StandAsideReader _standAside;
     private readonly RiskManager _risk;
 
     private readonly Dictionary<long, ManagedPosition> _managed = new();
@@ -77,14 +88,22 @@ public sealed class AutoTrader : IAsyncDisposable
     private DateTime _closedEntryBarOpen = DateTime.MinValue;
     private int _tick;
 
+    private readonly TradeJournal _journal;
+    /// <summary>Signal context of the most recent entry order per market, attached to the position once it fills.</summary>
+    private readonly Dictionary<string, (EntryContext Context, DateTime PlacedUtc)> _entryContext = new(StringComparer.OrdinalIgnoreCase);
+    private DateOnly _lastDigestDay = DateOnly.FromDateTime(DateTime.UtcNow);
+    private bool _profitLockNotified;
+
     public AutoTrader(BotConfig cfg, WhiteBitClient client, Notifications.TelegramNotifier? telegram = null)
     {
         _cfg = cfg;
         _client = client;
         _telegram = telegram;
         _signals = new SignalEngine(cfg.Signals);
+        _standAside = new StandAsideReader(cfg, client);
         _risk = new RiskManager(cfg.Risk, cfg.Trading);
         _live = !cfg.Trading.DryRun;
+        _journal = new TradeJournal(cfg.Trading.TradeJournalPath);
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -176,6 +195,7 @@ public sealed class AutoTrader : IAsyncDisposable
             {
                 var summary = await _client.GetCollateralSummaryAsync(ct);
                 var equity = summary?.Equity ?? 0m;
+                MaybeSendDailyDigest(equity);
                 if (_risk.TickUtcDay(equity))
                 {
                     Log.Risk("day-scoped halt cleared — leaving park");
@@ -319,12 +339,17 @@ public sealed class AutoTrader : IAsyncDisposable
         var positions = await _client.GetOpenPositionsAsync(null, ct);
         var equity = summary?.Equity ?? 0m;
 
+        // Digest before the day rolls inside CheckAccountHealth, so it reports
+        // the day that just ended with the equity it ended on.
+        MaybeSendDailyDigest(equity);
+
         if (_risk.CheckAccountHealth(equity, positions, out var haltReason))
         {
             Log.Risk($"account health check failed: {haltReason}");
             await FlattenAllAsync(positions, ct);
             return;
         }
+        NoteProfitLock(equity);
 
         ReconcileManaged(positions);
         await ResolveClosedTradesAsync(equity, ct);
@@ -355,12 +380,57 @@ public sealed class AutoTrader : IAsyncDisposable
         await ConsiderEntriesAsync(equity, openNotional, positions, ct);
 
         if (ShouldStatusLog())
+        {
+            var scale = _risk.RiskScale();
             Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | " +
                      $"pending {_pending.Count} | trades today {_risk.EntriesToday}/{_cfg.Risk.MaxTradesPerDay} | " +
-                     $"loss streak {_risk.ConsecutiveLosses}");
+                     $"loss streak {_risk.ConsecutiveLosses}" +
+                     (scale < 1 ? $" | risk x{scale:0.##}{(_risk.ProfitLocked ? " (profit lock)" : "")}" : ""));
+        }
 
         MaybeSendHeartbeat(equity, positions, openNotional);
         MaybePingWatchdog();
+    }
+
+    /// <summary>Telegram once when the day's profit lock switches the bot to reduced risk; reset on the new day.</summary>
+    private void NoteProfitLock(decimal equity)
+    {
+        if (_risk.ProfitLocked && !_profitLockNotified)
+        {
+            _profitLockNotified = true;
+            Log.Risk($"profit lock active — sizing at {_cfg.Risk.ProfitLockRiskScale:P0} for the rest of the UTC day");
+            _telegram?.Send($"🔒 Profit lock · {_cfg.Risk.MaxDailyProfitPct}% day reached\n" +
+                            $"Continuing at {_cfg.Risk.ProfitLockRiskScale:P0} risk until UTC midnight.\n" +
+                            $"Balance {equity:F2} USDT");
+        }
+        else if (!_risk.ProfitLocked)
+        {
+            _profitLockNotified = false;
+        }
+    }
+
+    /// <summary>
+    /// At UTC midnight, summarise the day that just ended from the journal.
+    /// One message per day; silent when nothing closed.
+    /// </summary>
+    private void MaybeSendDailyDigest(decimal equity)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (today == _lastDigestDay) return;
+        var ended = _lastDigestDay;
+        _lastDigestDay = today;
+
+        if (!_journal.Enabled) return;
+        var trades = _journal.ReadDay(ended);
+        var text = TradeJournal.FormatDigest(ended, trades, equity > 0 ? equity : null);
+        if (text is null)
+        {
+            Log.Info($"daily digest {ended:yyyy-MM-dd}: no closed trades");
+            return;
+        }
+
+        Log.Info($"daily digest {ended:yyyy-MM-dd}: {trades.Count} trades, net {trades.Sum(t => t.NetPnl):+0.00;-0.00} USDT");
+        if (_cfg.Telegram.DailyDigest) _telegram?.Send(text);
     }
 
     /// <summary>
@@ -454,7 +524,8 @@ public sealed class AutoTrader : IAsyncDisposable
     // ── Entries ─────────────────────────────────────────────────────────
 
     private sealed record ScannedEntry(
-        TradeSignal Signal, OrderBook Book, MarketRules Rules, decimal EntryPrice, SizingResult Sizing);
+        TradeSignal Signal, OrderBook Book, MarketRules Rules, decimal EntryPrice, SizingResult Sizing,
+        StandAsideSnapshot? Aside);
 
     private async Task ConsiderEntriesAsync(
         decimal equity, decimal openNotional, IReadOnlyList<Position> positions, CancellationToken ct)
@@ -567,14 +638,16 @@ public sealed class AutoTrader : IAsyncDisposable
         var bookTask = _client.GetOrderBookAsync(market, depth, ct);
         var entryTask = _client.GetKlinesAsync(market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
         var regimeTask = _client.GetKlinesAsync(market, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
-        await Task.WhenAll(bookTask, entryTask, regimeTask);
+        var asideTask = _standAside.LoadAsync(market, ct);
+        await Task.WhenAll(bookTask, entryTask, regimeTask, asideTask);
 
         var book = await bookTask;
         if (book is null) return null;
         var entry = await entryTask;
         var regime = await regimeTask;
 
-        var signal = _signals.Evaluate(market, entry, regime, book);
+        var aside = await asideTask;
+        var signal = _signals.Evaluate(market, entry, regime, book, aside);
 
         if (!signal.IsActionable)
         {
@@ -622,7 +695,7 @@ public sealed class AutoTrader : IAsyncDisposable
             return null;
         }
 
-        return new ScannedEntry(signal, book, rules, entryPrice, sizing);
+        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside);
     }
 
     private bool ShouldLogSizingReject(string market)
@@ -653,6 +726,10 @@ public sealed class AutoTrader : IAsyncDisposable
 
         foreach (var c in signal.Components.Where(c => c.Weight > 0))
             Log.Info($"    {c.Name,-10} {c.Direction,-5} w={c.Weight:F2}  {c.Detail}");
+
+        // Remembered per market and attached when the fill shows up as a
+        // position, so the journal can grade the trade against its setup.
+        _entryContext[market] = (EntryContext.From(signal, scanned.Aside, _risk.RiskScale(), DateTime.UtcNow), DateTime.UtcNow);
 
         if (!_live)
         {
@@ -746,7 +823,7 @@ public sealed class AutoTrader : IAsyncDisposable
             // The realised result is not in this response; it has to be read
             // back from the closed-PnL endpoint, which lags the close by a
             // moment. Queue it and resolve over the next few ticks.
-            _awaitingPnl.Add(new ClosedTrade(id, m.Market, m.IsLong, DateTime.UtcNow, m.LastExitReason));
+            _awaitingPnl.Add(new ClosedTrade(id, m.Market, m.IsLong, DateTime.UtcNow, m.LastExitReason, m));
         }
     }
 
@@ -789,11 +866,46 @@ public sealed class AutoTrader : IAsyncDisposable
             Log.Trade($"{t.Market} #{t.PositionId} closed: net {rec.NetPnl:+0.0000;-0.0000} USDT " +
                       $"({pct:+0.00;-0.00}%), fees {rec.TotalTradeFee:F4}, funding {rec.TotalFunding:F4}");
 
+            _journal.Append(BuildRecord(t, rec, pct));
+
             if (_cfg.Telegram.SendTrades)
                 _telegram?.Send(FormatClose(t, rec, pct, equity));
 
             _awaitingPnl.Remove(t);
         }
+    }
+
+    private TradeRecord BuildRecord(ClosedTrade t, ClosedPnl rec, decimal pct)
+    {
+        var m = t.State;
+        var stopDistance = m.EntryAtr * _cfg.Trading.StopLossAtrMult;
+        var initialRisk = m.InitialSize * stopDistance;
+        var opened = rec.OpenDate > 0 ? DateTimeOffset.FromUnixTimeSeconds(rec.OpenDate).UtcDateTime : m.OpenedUtc;
+        var closed = rec.CloseDate > 0 ? DateTimeOffset.FromUnixTimeSeconds(rec.CloseDate).UtcDateTime : t.ClosedUtc;
+
+        return new TradeRecord
+        {
+            PositionId = t.PositionId,
+            Market = t.Market,
+            Side = t.IsLong ? "long" : "short",
+            OpenedUtc = opened,
+            ClosedUtc = closed,
+            HeldMinutes = Math.Round((closed - opened).TotalMinutes, 1),
+            EntryPrice = rec.AvgEntryPrice,
+            ExitPrice = rec.AvgExitPrice,
+            Size = rec.ClosedSize,
+            NetPnl = rec.NetPnl,
+            GrossPnl = rec.GrossPnl,
+            Fees = rec.TotalTradeFee,
+            Funding = rec.TotalFunding,
+            NetPct = Math.Round(pct, 4),
+            RMultiple = initialRisk > 0 ? Math.Round(rec.NetPnl / initialRisk, 3) : null,
+            MaxFavourableR = Math.Round(m.MaxFavourableR, 3),
+            ExitReason = string.IsNullOrWhiteSpace(t.ExitReason) ? "exchange" : t.ExitReason,
+            Adopted = m.Adopted,
+            PartialTaken = m.PartialTaken,
+            Entry = m.Entry,
+        };
     }
 
     private async Task ManagePositionAsync(Position pos, CancellationToken ct)
@@ -844,6 +956,9 @@ public sealed class AutoTrader : IAsyncDisposable
         if (stopChange is not null)
             Log.Trade($"{pos.Market}: {stopChange}");
 
+        if (await TryPartialTakeAsync(pos, m, rules, mark, rMultiple, roundTrip, ct))
+            return; // let the exchange report the reduced size before deciding anything else
+
         var regimeAgainst = await ShouldExitAgainstRegimeAsync(pos, m, rMultiple, ct);
         var exitReason = ExitRules.Decide(
             m, mark, DateTime.UtcNow, _cfg.Trading, roundTrip,
@@ -888,6 +1003,86 @@ public sealed class AutoTrader : IAsyncDisposable
     }
 
     /// <summary>
+    /// Bank part of the trade at PartialTakeAtR with a reduce-only market
+    /// order and put the rest behind a break-even+fees stop. Returns true when
+    /// an order was sent this tick. Both the closed part and the remainder
+    /// must clear the market minimums, otherwise the partial is skipped for
+    /// this trade and the normal exits apply.
+    /// </summary>
+    private async Task<bool> TryPartialTakeAsync(
+        Position pos, ManagedPosition m, MarketRules rules, decimal mark, decimal rMultiple,
+        decimal roundTrip, CancellationToken ct)
+    {
+        var cfg = _cfg.Trading;
+        if (cfg.PartialTakeAtR <= 0 || m.PartialTaken || rMultiple < cfg.PartialTakeAtR) return false;
+
+        var closeAmount = rules.FloorAmount(pos.AbsAmount * cfg.PartialTakeFraction);
+        var remainder = pos.AbsAmount - closeAmount;
+        string? why = null;
+        if (!rules.IsTradable(closeAmount, mark, out var whyClose)) why = $"closing part: {whyClose}";
+        else if (!rules.IsTradable(remainder, mark, out var whyRest)) why = $"remainder: {whyRest}";
+        if (why is not null)
+        {
+            m.PartialTaken = true;
+            Log.Info($"{pos.Market} #{pos.PositionId}: partial take skipped at {rMultiple:F2}R - {why}");
+            return false;
+        }
+
+        var be = ExitRules.BreakEvenPrice(m, roundTrip, (price, isBuy) => rules.SnapPriceForSide(price, isBuy));
+        Log.Trade($"{pos.Market} #{pos.PositionId}: partial take {rules.FormatAmount(closeAmount)} of " +
+                  $"{pos.AbsAmount} at {rMultiple:F2}R (>= {cfg.PartialTakeAtR}R), stop -> {be}");
+
+        if (!_live)
+        {
+            m.PartialTaken = true;
+            ApplyPartialStop(m, be, mark);
+            Log.Info($"{pos.Market}: DRY RUN - partial close not sent");
+            return false;
+        }
+
+        try
+        {
+            var order = await _client.PlaceCollateralMarketAsync(new CollateralMarketOrderPayload
+            {
+                Market = pos.Market!,
+                Side = m.IsLong ? "sell" : "buy",
+                Amount = rules.FormatAmount(closeAmount),
+                ReduceOnly = true,
+                PositionSide = pos.PositionSide,
+                ClientOrderId = $"tp-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+                Stp = "co"
+            }, ct);
+
+            m.PartialTaken = true;
+            ApplyPartialStop(m, be, mark);
+            Log.Trade($"{pos.Market} #{pos.PositionId}: partial close order #{order?.OrderId} ({order?.Status})");
+            if (_cfg.Telegram.SendTrades)
+                _telegram?.Send($"✂️ Partial {Short(pos.Market)} {(m.IsLong ? "long" : "short")} · " +
+                                $"{cfg.PartialTakeFraction:P0} off at {rMultiple:F1}R, rest at break-even");
+            return true;
+        }
+        catch (ApiException ex)
+        {
+            // Do not retry every 2s against a rejecting endpoint; the normal
+            // target / trail still manage the full size.
+            m.PartialTaken = true;
+            Log.Warn($"{pos.Market} #{pos.PositionId}: partial close rejected - {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void ApplyPartialStop(ManagedPosition m, decimal be, decimal mark)
+    {
+        var improves = (m.IsLong && be > m.StopPrice) || (!m.IsLong && be < m.StopPrice);
+        var behindMark = (m.IsLong && be < mark) || (!m.IsLong && be > mark);
+        if (improves && behindMark)
+        {
+            m.StopPrice = be;
+            m.MovedToBreakEven = true;
+        }
+    }
+
+    /// <summary>
     /// Build management state for a position we did not open in this session
     /// (a restart, or one opened by hand). Stops are derived from current ATR.
     /// </summary>
@@ -919,6 +1114,17 @@ public sealed class AutoTrader : IAsyncDisposable
             return null;
         }
 
+        // A fill of our own entry order shows up here too. If this session
+        // placed an order on this market a few minutes ago, the position is
+        // ours and carries that signal's context; otherwise it is adopted.
+        EntryContext? context = null;
+        if (_entryContext.TryGetValue(pos.Market!, out var ctx) &&
+            DateTime.UtcNow - ctx.PlacedUtc < TimeSpan.FromMinutes(15))
+        {
+            context = ctx.Context;
+            _entryContext.Remove(pos.Market!);
+        }
+
         var m = new ManagedPosition
         {
             PositionId = pos.PositionId,
@@ -927,13 +1133,15 @@ public sealed class AutoTrader : IAsyncDisposable
             EntryPrice = entry,
             EntryAtr = atr,
             OpenedUtc = pos.OpenedAtUtc == default ? DateTime.UtcNow : pos.OpenedAtUtc,
-            Adopted = true,
+            Adopted = context is null,
+            InitialSize = pos.AbsAmount,
+            Entry = context,
             HighWater = entry,
             StopPrice = rules.SnapPriceForSide(entry - sign * atr * _cfg.Trading.StopLossAtrMult, isBuy: !isLong),
             TakeProfitPrice = rules.SnapPriceForSide(entry + sign * atr * _cfg.Trading.TakeProfitAtrMult, isBuy: isLong)
         };
 
-        Log.Trade($"{pos.Market}: adopted #{pos.PositionId} {(isLong ? "LONG" : "SHORT")} " +
+        Log.Trade($"{pos.Market}: {(context is null ? "adopted" : "managing")} #{pos.PositionId} {(isLong ? "LONG" : "SHORT")} " +
                   $"entry {entry} stop {m.StopPrice} tp {m.TakeProfitPrice} (ATR {atr})");
         return m;
     }

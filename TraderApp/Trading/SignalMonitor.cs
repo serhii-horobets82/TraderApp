@@ -14,12 +14,14 @@ public sealed class SignalMonitor
     private readonly BotConfig _cfg;
     private readonly WhiteBitClient _client;
     private readonly SignalEngine _engine;
+    private readonly StandAsideReader _standAside;
 
     public SignalMonitor(BotConfig cfg, WhiteBitClient client)
     {
         _cfg = cfg;
         _client = client;
         _engine = new SignalEngine(cfg.Signals);
+        _standAside = new StandAsideReader(cfg, client);
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -51,12 +53,13 @@ public sealed class SignalMonitor
             var bookTask = _client.GetOrderBookAsync(market, depth, ct);
             var entryTask = _client.GetKlinesAsync(market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
             var regimeTask = _client.GetKlinesAsync(market, _cfg.Trading.RegimeInterval, _cfg.Trading.CandleLookback, ct);
-            await Task.WhenAll(bookTask, entryTask, regimeTask);
+            var asideTask = _standAside.LoadAsync(market, ct);
+            await Task.WhenAll(bookTask, entryTask, regimeTask, asideTask);
 
             var book = await bookTask;
             if (book is null) { Log.Warn($"{market}: no order book"); return; }
 
-            var s = _engine.Evaluate(market, await entryTask, await regimeTask, book);
+            var s = _engine.Evaluate(market, await entryTask, await regimeTask, book, await asideTask);
 
             var line = $"{market,-10} mid {s.Price,12} | ATR {s.AtrPct:F3}% | spread {s.SpreadBps:F2}bps | {s.Explain()}";
             if (s.IsActionable) Log.Trade(line); else Log.Info(line);

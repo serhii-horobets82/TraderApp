@@ -40,6 +40,14 @@ public static class ExitRules
         return (mark - m.EntryPrice) * sign / r;
     }
 
+    /// <summary>Entry plus the round-trip fee, snapped in the conservative direction for the stop side.</summary>
+    public static decimal BreakEvenPrice(ITradeState m, decimal roundTripFeePct, Func<decimal, bool, decimal> snapPrice)
+    {
+        var sign = m.IsLong ? 1m : -1m;
+        var feeCushion = m.EntryPrice * (roundTripFeePct / 100m);
+        return snapPrice(m.EntryPrice + sign * feeCushion, !m.IsLong);
+    }
+
     /// <summary>
     /// Records the running high-water mark and best excursion, then moves the
     /// stop to break-even and finally trails it. Returns a description of any

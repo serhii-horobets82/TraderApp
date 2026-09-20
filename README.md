@@ -82,7 +82,14 @@ dilute a real setup.
 - ATR% outside `[MinAtrPct, MaxAtrPct]` — nothing to scalp, or a volatility spike
 - RSI at a blow-off extreme (≥78 or ≤22)
 - direction disagreeing with a decided higher-timeframe regime
+- thin book: less than `MinBookDepthUsd` (1000 USDT) resting on the thinner side of the top 10 levels
+- crowded perp funding, or a fresh BTC 1h flip against the alt (stand-aside rules)
 - not enough candle history, empty book side
+
+**Time gates** (in the risk layer, not the signal): new entries only between
+`EntryHoursUtcStart` and `EntryHoursUtcEnd` (06–22 UTC — Asian-session alt
+books are thin and spreads wide), and Saturday/Sunday size is scaled by
+`WeekendRiskScale` (0.5). Open positions are managed at every hour.
 
 ADX decides which playbook is live: above `AdxTrendThreshold` (22) the bot takes
 pullbacks in the trend; below it, band reversion.
@@ -130,7 +137,7 @@ nothing.
 |---|---|---|
 | Session drawdown | −2% from start equity | Flatten + halt |
 | Peak drawdown | −2% from session peak | Flatten + halt (protects winners from give-back) |
-| Daily profit lock | +1.5% session | Halt — lock a green day |
+| Daily profit lock | +1.5% session | Continue at `ProfitLockRiskScale` (×0.5) until UTC midnight; `0` halts instead |
 | Consecutive losses | 10 | Hard halt (`HaltOnConsecutiveLosses`) |
 | Max concurrent | 1 | One position at a time |
 | Same-direction cap | 1 | No stacked longs/shorts across alts |
@@ -141,6 +148,20 @@ nothing.
 Set `HaltOnConsecutiveLosses` to `false` if you prefer a cooldown
 (`LossCooldownMinutes`) instead of ending the session. Set
 `MaxDailyProfitPct` / `MaxPeakDrawdownPct` to `0` to disable those locks.
+
+**Profit lock is a throttle, not a stop.** With `ProfitLockRiskScale: 0.5`, once
+the day is +1.5% the bot keeps trading at half `RiskPerTradePct` and half the
+notional caps for the rest of the UTC day, and the peak-drawdown rule (−2%
+from the high) still ends the day if the gains are given back. Set the scale to
+`0` to get the original "flatten and park until midnight" behaviour. The lock
+state survives a restart via the session-state file and releases at UTC midnight.
+
+**Partial take-profit.** At `PartialTakeAtR` (1.5R) the bot closes
+`PartialTakeFraction` (50%) with a reduce-only market order and moves the stop
+on the remainder to entry+fees. The rest runs to the 3.0×ATR target or the
+1.3×ATR trail. Both halves must clear the market's `minAmount`/`minTotal` or
+the partial is skipped for that trade. The time stop is 300 minutes — long
+enough for a 3×ATR target to be reachable on 15m bars, which 120 was not.
 
 **Halt persistence:** a hard halt is written to `data/session-state.json` and the
 process **parks** instead of exiting, so Railway's `restartPolicyType: ALWAYS`
@@ -178,7 +199,14 @@ The settings worth knowing:
 | `Risk.RiskPerTradePct` | `0.25` | Percent of equity lost if the stop is hit |
 | `Risk.MaxDailyDrawdownPct` | `2` | Session-start equity cutout |
 | `Risk.MaxPeakDrawdownPct` | `2` | Drawdown from session peak (0 = off) |
-| `Risk.MaxDailyProfitPct` | `1.5` | Lock a green day and halt (0 = off) |
+| `Risk.MaxDailyProfitPct` | `1.5` | Green-day lock threshold (0 = off) |
+| `Risk.ProfitLockRiskScale` | `0.5` | After the lock: keep trading at this risk scale; `0` halts for the day |
+| `Risk.WeekendRiskScale` | `0.5` | Risk multiplier on Saturday/Sunday UTC |
+| `Trading.EntryHoursUtcStart` / `End` | `6` / `22` | New entries only in this UTC window (equal = always) |
+| `Trading.PartialTakeAtR` / `PartialTakeFraction` | `1.5` / `0.5` | Bank half at 1.5R, rest to break-even (0 = off) |
+| `Trading.MaxPositionMinutes` | `300` | Time stop; must give a 3×ATR target room on 15m bars |
+| `Trading.TradeJournalPath` | `data/trades.jsonl` | One JSON line per closed trade with its entry context |
+| `Signals.MinBookDepthUsd` | `1000` | Thin-side depth over the top 10 levels below this is a veto |
 | `Risk.MaxConcurrentPositions` | `1` | One position at a time |
 | `Risk.MaxTradesPerHour` / `MaxTradesPerDay` | `6` / `16` | Overtrading budget |
 | `Risk.HaltOnConsecutiveLosses` | `true` | 10 losses → session halt (else cooldown) |
@@ -186,6 +214,8 @@ The settings worth knowing:
 | `Trading.StatusLogEveryTicks` | `20` | Equity status cadence (~40s). Blocked setups log once per new 15m bar |
 | `Signals.MinScore` | `0.58` | Raise for fewer, higher-conviction trades |
 | `Signals.RequireMacdAlign` | `false` | When true, MACD histogram must agree with direction |
+| `Signals.StandAsideEnabled` | `true` | Veto crowded funding or a BTC 1h flip against the alt |
+| `Signals.MaxFundingRate` | `0.0002` | Predicted perp funding (0.02%) that refuses the crowded side |
 
 ### Why the entry timeframe is 15m
 
@@ -266,7 +296,17 @@ in `appsettings.json` as `Telegram.ChatId`, and set `Telegram.Enabled: true`.
 | `SendErrors` | `true` | API and loop failures |
 | `Verbose` | `false` | Every raw log line - signal breakdowns, order ids, stop moves |
 | `HeartbeatMinutes` | `60` | Periodic balance and open positions; `0` disables |
+| `DailyDigest` | `true` | At UTC midnight: yesterday's trades, win rate, profit factor, fee share, exits by reason, best/worst |
 | `WatchdogPingUrl` | empty | healthchecks.io ping URL — alerts Telegram if pings stop |
+
+**Trade journal.** Every closed trade is appended to `data/trades.jsonl` with
+the realised result from the exchange *and* what the signal looked like at
+entry: score, agreeing components, ATR%, spread, 1h regime, perp funding, BTC
+regime, hour and weekday, and the risk scale in force. That is what the daily
+digest is built from, and it is the file to load in a notebook when deciding
+which filter to tighten — grade trades by `entry.components`, `entry.hourUtc`
+or `entry.atrPct`, not by gut. Mount a volume on `/app/data` on Railway or the
+file is lost on redeploy.
 
 **When the bot is down.** A Railway deploy SIGTERMs the old replica; that is
 planned, so it does **not** text “is down” (you will already have `Started`
@@ -425,8 +465,12 @@ TraderApp/
   Indicators/
     Candle.cs                  kline parsing
     Ta.cs                      EMA, SMA, RSI, ATR, ADX, Bollinger, VWAP
-  Signals/SignalEngine.cs      confluence scoring + vetoes
-  Risk/RiskManager.cs          sizing, limits, circuit breakers
+  Signals/
+    SignalEngine.cs            confluence scoring + vetoes
+    StandAside.cs              funding / BTC-flip stand-aside rules
+  Risk/
+    RiskManager.cs             sizing, limits, circuit breakers, risk scaling
+    SessionStateStore.cs       halt / lock persistence across restarts
   Notifications/
     TelegramNotifier.cs        queued, non-blocking Telegram delivery
   Backtest/
@@ -435,8 +479,9 @@ TraderApp/
     Backtester.cs              bar-by-bar replay
     HistoryLoader.cs           paged kline download with disk cache
   Trading/
-    AutoTrader.cs              the loop, entries, position management
+    AutoTrader.cs              the loop, entries, position management, partial takes
     ExitRules.cs               stop/exit logic shared by live and backtest
+    TradeJournal.cs            JSONL trade log + daily digest
     SignalMonitor.cs           --signals-only mode
     Log.cs                     console + file logging + notifier hook
 ```

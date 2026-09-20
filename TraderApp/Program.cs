@@ -14,6 +14,23 @@ internal static class Program
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
+        // A mistyped flag must never fall through to live trading.
+        var unknown = args.Where(a => a.StartsWith("--", StringComparison.Ordinal))
+            .Where(a => !KnownFlags.Contains(a))
+            .ToList();
+        if (unknown.Count > 0)
+        {
+            Console.Error.WriteLine($"unknown option(s): {string.Join(" ", unknown)}");
+            Console.Error.WriteLine("known: " + string.Join(" ", KnownFlags.OrderBy(f => f)));
+            return 2;
+        }
+        if (args.Contains("--signal-quality", StringComparer.OrdinalIgnoreCase) &&
+            !args.Contains("--backtest", StringComparer.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("--signal-quality is a --backtest option: use --backtest --signal-quality [--days N]");
+            return 2;
+        }
+
         var config = LoadConfig(args);
 
         var signalsOnly = args.Contains("--signals-only", StringComparer.OrdinalIgnoreCase);
@@ -153,6 +170,12 @@ internal static class Program
         return 0;
     }
 
+    private static readonly HashSet<string> KnownFlags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "--signals-only", "--dry-run", "--backtest", "--days", "--sweep", "--fee",
+        "--end-days-ago", "--signal-quality", "--telegram-test",
+    };
+
     private static BotConfig LoadConfig(string[] _)
     {
         var builder = new ConfigurationBuilder()
@@ -205,7 +228,10 @@ internal static class Program
         Console.WriteLine($"  Hard stop     : {c.Trading.HardStopMultiplier}x bot stop, attached to the entry order");
         Console.WriteLine($"  Max positions : {c.Risk.MaxConcurrentPositions} (max {c.Risk.MaxTotalNotionalUsd} notional)");
         Console.WriteLine($"  Daily cutout  : -{c.Risk.MaxDailyDrawdownPct}% session / -{c.Risk.MaxPeakDrawdownPct}% from peak");
-        Console.WriteLine($"  Profit lock   : +{c.Risk.MaxDailyProfitPct}% session (0 = off)");
+        Console.WriteLine($"  Profit lock   : +{c.Risk.MaxDailyProfitPct}% session → {(c.Risk.ProfitLockRiskScale > 0 ? $"risk x{c.Risk.ProfitLockRiskScale:0.##}" : "HALT")} (0 = off)");
+        Console.WriteLine($"  Weekend risk  : x{c.Risk.WeekendRiskScale:0.##} · entry hours {(c.Trading.EntryHoursUtcStart == c.Trading.EntryHoursUtcEnd ? "any" : $"{c.Trading.EntryHoursUtcStart:00}-{c.Trading.EntryHoursUtcEnd:00} UTC")}");
+        Console.WriteLine($"  Partial take  : {(c.Trading.PartialTakeAtR > 0 ? $"{c.Trading.PartialTakeFraction:P0} at {c.Trading.PartialTakeAtR}R, rest to break-even" : "off")} · time stop {c.Trading.MaxPositionMinutes}m");
+        Console.WriteLine($"  Book depth    : {(c.Signals.MinBookDepthUsd > 0 ? $"min {c.Signals.MinBookDepthUsd:F0} USDT thin side" : "unchecked")} · journal {(string.IsNullOrWhiteSpace(c.Trading.TradeJournalPath) ? "off" : c.Trading.TradeJournalPath)}");
         Console.WriteLine($"  Trade budget  : {c.Risk.MaxTradesPerHour}/hour, {c.Risk.MaxTradesPerDay}/day UTC");
         Console.WriteLine($"  Loss streak   : {c.Risk.MaxConsecutiveLosses} → {(c.Risk.HaltOnConsecutiveLosses ? "HALT" : $"cooldown {c.Risk.LossCooldownMinutes}m")}");
         Console.WriteLine($"  Break-even    : {(c.Trading.BreakEvenEnabled ? "on" : "off")} · trail at {c.Trading.TrailStartAtR}R · scratch {c.Trading.ScratchUnprofitableMinutes}m");
@@ -214,6 +240,7 @@ internal static class Program
         Console.WriteLine($"  Loop          : every {c.Trading.LoopIntervalMs}ms, status every {c.Trading.StatusLogEveryTicks} ticks");
         Console.WriteLine($"  MACD align    : {(c.Signals.RequireMacdAlign ? "required" : "optional")}");
         Console.WriteLine($"  HTF flat      : {(c.Signals.RequireDecidedHtf ? "blocks entries" : "allows chop setups")}");
+        Console.WriteLine($"  Stand-aside   : {(c.Signals.StandAsideEnabled ? $"funding {c.Signals.MaxFundingRate:P2} / {c.Signals.AnchorMarket} {c.Signals.AnchorInterval} flip" : "off")}");
         Console.WriteLine("  Ctrl+C to stop.");
         Console.WriteLine();
     }

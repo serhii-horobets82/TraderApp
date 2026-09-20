@@ -291,6 +291,17 @@ public sealed class OrderBook
         }
     }
 
+    /// <summary>Resting notional (price × amount, in quote) on the thinner side of the top <paramref name="depth"/> levels.</summary>
+    public decimal ThinSideDepthQuote(int depth)
+    {
+        decimal bid = 0, ask = 0;
+        for (int i = 0; i < Math.Min(depth, Bids.Count); i++)
+            if (Bids[i].Count > 1) bid += Bids[i][0] * Bids[i][1];
+        for (int i = 0; i < Math.Min(depth, Asks.Count); i++)
+            if (Asks[i].Count > 1) ask += Asks[i][0] * Asks[i][1];
+        return Math.Min(bid, ask);
+    }
+
     /// <summary>
     /// (bidVolume - askVolume) / total over the top <paramref name="depth"/> levels.
     /// Positive means resting buy interest dominates.
@@ -304,5 +315,47 @@ public sealed class OrderBook
             if (Asks[i].Count > 1) ask += Asks[i][1];
         var total = bid + ask;
         return total <= 0 ? 0 : (double)((bid - ask) / total);
+    }
+}
+
+/// <summary>One row of GET /api/v4/public/futures.</summary>
+public sealed class FuturesMarket
+{
+    [JsonProperty("ticker_id")] public string TickerId { get; set; } = "";
+    [JsonProperty("stock_currency")] public string StockCurrency { get; set; } = "";
+    [JsonProperty("funding_rate")] public decimal FundingRate { get; set; }
+}
+
+/// <summary>Cached public futures book: lookup by BTC_PERP or by SOL from SOL_USDT.</summary>
+public sealed class FuturesSnapshot
+{
+    public static readonly FuturesSnapshot Empty = new();
+
+    private readonly Dictionary<string, FuturesMarket> _byTicker =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, FuturesMarket> _byStock =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public FuturesSnapshot() { }
+
+    public FuturesSnapshot(IEnumerable<FuturesMarket> rows)
+    {
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.TickerId)) continue;
+            _byTicker[row.TickerId] = row;
+            if (!string.IsNullOrWhiteSpace(row.StockCurrency) &&
+                !_byStock.ContainsKey(row.StockCurrency))
+                _byStock[row.StockCurrency] = row;
+        }
+    }
+
+    public bool TryGet(string perpTicker, string spotMarket, out FuturesMarket row)
+    {
+        if (_byTicker.TryGetValue(perpTicker, out row!)) return true;
+        var usdt = spotMarket.IndexOf('_');
+        if (usdt > 0 && _byStock.TryGetValue(spotMarket[..usdt], out row!)) return true;
+        row = null!;
+        return false;
     }
 }

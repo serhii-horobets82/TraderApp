@@ -36,6 +36,7 @@ public sealed record TradeSignal
         Vetoes.Count > 0 && Vetoes.All(v =>
             v.StartsWith("spread ", StringComparison.Ordinal) ||
             v.StartsWith("book ", StringComparison.Ordinal) ||
+            v.StartsWith("depth ", StringComparison.Ordinal) ||
             v.Equals("empty order book side", StringComparison.Ordinal));
 
     public string Explain()
@@ -67,7 +68,8 @@ public sealed class SignalEngine
         string market,
         IReadOnlyList<Candle> entryCandles,
         IReadOnlyList<Candle> regimeCandles,
-        OrderBook book)
+        OrderBook book,
+        StandAsideSnapshot? standAside = null)
     {
         var vetoes = new List<string>();
         var components = new List<SignalComponent>();
@@ -117,6 +119,9 @@ public sealed class SignalEngine
             vetoes.Add($"ATR {atrPct:F3}% > {_cfg.MaxAtrPct}% (volatility spike)");
         if (book.BestBid is null || book.BestAsk is null)
             vetoes.Add("empty order book side");
+        var thinSide = book.ThinSideDepthQuote(_cfg.OrderBookDepth);
+        if (_cfg.MinBookDepthUsd > 0 && thinSide < _cfg.MinBookDepthUsd)
+            vetoes.Add($"depth {thinSide:F0} USDT on the thin side < {_cfg.MinBookDepthUsd:F0} (top {_cfg.OrderBookDepth} levels)");
 
         // ── Regime filter on the higher timeframe ───────────────────────
         var regimeCloses = Ta.Closes(regimeCandles);
@@ -363,6 +368,8 @@ public sealed class SignalEngine
                 if (chosen == Direction.Short && h > 0)
                     vetoes.Add("MACD histogram is still positive - short is fighting momentum");
             }
+
+            StandAsideRules.Apply(vetoes, market, chosen, standAside, _cfg);
         }
         else
         {

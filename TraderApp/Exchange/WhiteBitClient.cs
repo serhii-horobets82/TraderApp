@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json;
 using TraderApp.Configuration;
+using TraderApp.Trading;
 
 namespace TraderApp.Exchange;
 
@@ -54,6 +55,10 @@ public sealed class WhiteBitClient : IDisposable
     private long _lastPrivateTicks;
     private readonly ConcurrentDictionary<string, (IReadOnlyList<Indicators.Candle> Candles, DateTime ValidUntilUtc)> _klineCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<IReadOnlyList<Indicators.Candle>>> _klineInflight = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _futuresGate = new();
+    private FuturesSnapshot _futuresCache = FuturesSnapshot.Empty;
+    private DateTime _futuresValidUntil = DateTime.MinValue;
+    private Task<FuturesSnapshot>? _futuresInflight;
 
     public WhiteBitClient(ApiConfig cfg)
     {
@@ -82,6 +87,55 @@ public sealed class WhiteBitClient : IDisposable
     /// <summary>GET /api/v4/public/orderbook/{market}</summary>
     public Task<OrderBook?> GetOrderBookAsync(string market, int limit, CancellationToken ct) =>
         GetAsync<OrderBook>($"/api/v4/public/orderbook/{market}?limit={Math.Clamp(limit, 1, 100)}", ct);
+
+    /// <summary>
+    /// GET /api/v4/public/futures — predicted funding + open interest.
+    /// Cached for a minute; the exchange already caches this for ~10–60s.
+    /// </summary>
+    public Task<FuturesSnapshot> GetFuturesSnapshotAsync(CancellationToken ct)
+    {
+        lock (_futuresGate)
+        {
+            if (DateTime.UtcNow < _futuresValidUntil)
+                return Task.FromResult(_futuresCache);
+            _futuresInflight ??= FetchFuturesSnapshotAsync(ct);
+            return _futuresInflight;
+        }
+    }
+
+    private async Task<FuturesSnapshot> FetchFuturesSnapshotAsync(CancellationToken ct)
+    {
+        try
+        {
+            var raw = await GetAsync<FuturesEnvelope>("/api/v4/public/futures", ct);
+            var snap = raw is { Success: true, Result: { } rows }
+                ? new FuturesSnapshot(rows)
+                : FuturesSnapshot.Empty;
+            lock (_futuresGate)
+            {
+                _futuresCache = snap;
+                _futuresValidUntil = DateTime.UtcNow.AddSeconds(60);
+                _futuresInflight = null;
+            }
+            return snap;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log.Diag($"[futures] snapshot failed: {ex.Message}");
+            lock (_futuresGate)
+            {
+                _futuresValidUntil = DateTime.UtcNow.AddSeconds(20);
+                _futuresInflight = null;
+            }
+            return _futuresCache;
+        }
+    }
+
+    private sealed class FuturesEnvelope
+    {
+        [JsonProperty("success")] public bool Success { get; set; }
+        [JsonProperty("result")] public List<FuturesMarket>? Result { get; set; }
+    }
 
     /// <summary>
     /// GET /api/v1/public/kline - still the v1 endpoint; there is no v4 equivalent.

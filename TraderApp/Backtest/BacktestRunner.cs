@@ -20,6 +20,17 @@ public static class BacktestRunner
         Console.WriteLine($"  Backtest  {fromUtc:yyyy-MM-dd} .. {toUtc:yyyy-MM-dd}  ({days} days)");
         Console.WriteLine($"  Markets   {string.Join(", ", cfg.Trading.Markets)}");
         Console.WriteLine($"  Entry {cfg.Trading.EntryInterval} / regime {cfg.Trading.RegimeInterval}");
+
+        // Filters that need live-only data cannot be replayed from klines:
+        // the synthetic book has no depth and there is no funding history.
+        // Leaving them on would veto every bar and measure nothing.
+        var liveOnly = new List<string>();
+        if (cfg.Signals.MinBookDepthUsd > 0) { cfg.Signals.MinBookDepthUsd = 0; liveOnly.Add("MinBookDepthUsd"); }
+        if (cfg.Signals.StandAsideEnabled) { cfg.Signals.StandAsideEnabled = false; liveOnly.Add("StandAside"); }
+        if (cfg.Trading.PartialTakeAtR > 0) liveOnly.Add("PartialTake (not simulated)");
+        if (cfg.Trading.EntryHoursUtcStart != cfg.Trading.EntryHoursUtcEnd) liveOnly.Add("EntryHours (not simulated)");
+        if (liveOnly.Count > 0)
+            Console.WriteLine($"  Live-only  {string.Join(", ", liveOnly)} — ignored in replay");
         Console.WriteLine();
 
         var rules = await client.GetMarketRulesAsync(ct);
@@ -193,6 +204,7 @@ public static class BacktestRunner
             RequireMacdAlign = c.Signals.RequireMacdAlign,
             RequireDecidedHtf = c.Signals.RequireDecidedHtf,
             BookVetoMinImbalance = c.Signals.BookVetoMinImbalance,
+            StandAsideEnabled = false,
             AdxTrendThreshold = c.Signals.AdxTrendThreshold,
             RsiOversold = c.Signals.RsiOversold, RsiOverbought = c.Signals.RsiOverbought,
             RsiExtremeHigh = c.Signals.RsiExtremeHigh, RsiExtremeLow = c.Signals.RsiExtremeLow,

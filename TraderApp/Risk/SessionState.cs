@@ -17,4 +17,7 @@ public sealed class SessionState
     public decimal SessionStartEquity { get; set; }
     public decimal PeakEquity { get; set; }
     public DateTime? CooldownUntilUtc { get; set; }
+
+    /// <summary>UTC day (yyyy-MM-dd) on which the profit lock switched to reduced risk. Empty = not locked.</summary>
+    public string ProfitLockedDay { get; set; } = "";
 }

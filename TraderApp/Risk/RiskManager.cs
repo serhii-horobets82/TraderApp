@@ -27,8 +27,38 @@ public sealed class RiskManager
     private DateTime? _cooldownUntil;
     private DateTime? _haltedAtUtc;
     private HaltKind _haltKind;
+    private DateOnly? _profitLockedDay;
 
     public decimal SessionStartEquity { get; private set; }
+
+    /// <summary>True while the day's profit lock has switched the bot to reduced risk (ProfitLockRiskScale &gt; 0).</summary>
+    public bool ProfitLocked => _profitLockedDay is { } d && d == DateOnly.FromDateTime(DateTime.UtcNow);
+
+    /// <summary>
+    /// Combined multiplier applied to RiskPerTradePct and the notional caps:
+    /// profit lock (after the day's cap) times the weekend scale.
+    /// </summary>
+    public decimal RiskScale(DateTime? utcNow = null)
+    {
+        var now = utcNow ?? DateTime.UtcNow;
+        var scale = 1m;
+        if (ProfitLocked && _cfg.ProfitLockRiskScale > 0)
+            scale *= _cfg.ProfitLockRiskScale;
+        if (_cfg.WeekendRiskScale > 0 && _cfg.WeekendRiskScale < 1 &&
+            now.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+            scale *= _cfg.WeekendRiskScale;
+        return scale;
+    }
+
+    /// <summary>Whether a new entry may be placed at this UTC hour (open positions are always managed).</summary>
+    public static bool InsideEntryHours(TradingConfig trading, DateTime utcNow)
+    {
+        var start = trading.EntryHoursUtcStart;
+        var end = trading.EntryHoursUtcEnd;
+        if (start == end) return true;
+        var h = utcNow.Hour;
+        return start < end ? h >= start && h < end : h >= start || h < end;
+    }
     public decimal PeakEquity { get; private set; }
     public int ConsecutiveLosses => _consecutiveLosses;
     public int EntriesToday => _entriesToday;
@@ -75,6 +105,10 @@ public sealed class RiskManager
 
         if (saved.CooldownUntilUtc is { } until && until > DateTime.UtcNow)
             _cooldownUntil = until;
+
+        if (!string.IsNullOrEmpty(saved.ProfitLockedDay) &&
+            DateOnly.TryParse(saved.ProfitLockedDay, out var lockedDay))
+            _profitLockedDay = lockedDay;
 
         if (saved.Halted)
         {
@@ -173,15 +207,27 @@ public sealed class RiskManager
                 return true;
             }
 
-            if (_cfg.MaxDailyProfitPct > 0)
+            if (_cfg.MaxDailyProfitPct > 0 && !ProfitLocked)
             {
                 var profitPct = (equity - SessionStartEquity) / SessionStartEquity * 100m;
                 if (profitPct >= _cfg.MaxDailyProfitPct)
                 {
-                    reason = $"daily profit lock hit {profitPct:F2}% (cap {_cfg.MaxDailyProfitPct}%) — " +
-                             $"locking the green day at equity {equity:F2}";
-                    Halt(reason, HaltKind.DailyProfit);
-                    return true;
+                    if (_cfg.ProfitLockRiskScale > 0)
+                    {
+                        // Keep trading, smaller. The peak-drawdown rule still
+                        // catches a give-back of what has been earned.
+                        _profitLockedDay = DateOnly.FromDateTime(DateTime.UtcNow);
+                        Log.Risk($"daily profit lock hit {profitPct:F2}% (cap {_cfg.MaxDailyProfitPct}%) — " +
+                                 $"continuing at {_cfg.ProfitLockRiskScale:P0} risk for the rest of the UTC day");
+                        Persist();
+                    }
+                    else
+                    {
+                        reason = $"daily profit lock hit {profitPct:F2}% (cap {_cfg.MaxDailyProfitPct}%) — " +
+                                 $"locking the green day at equity {equity:F2}";
+                        Halt(reason, HaltKind.DailyProfit);
+                        return true;
+                    }
                 }
             }
         }
@@ -266,6 +312,12 @@ public sealed class RiskManager
         RollDayIfNeeded(now);
 
         if (Halted) { reason = $"halted: {HaltReason}"; return false; }
+
+        if (!InsideEntryHours(_trading, now))
+        {
+            reason = $"outside entry hours {_trading.EntryHoursUtcStart:00}-{_trading.EntryHoursUtcEnd:00} UTC";
+            return false;
+        }
 
         if (_cooldownUntil is { } until && now < until)
         {
@@ -369,12 +421,15 @@ public sealed class RiskManager
             return new SizingResult(false, 0, 0, 0, 0,
                 $"stop {stopPct:F3}% is inside the fee band (need {minStop:F3}%) - a winner still dies on the round trip");
 
-        var riskAmount = equity * (_cfg.RiskPerTradePct / 100m);
+        // Profit lock / weekend scale shrink both the risk and the caps, so
+        // the reduced size is real and not clipped back up by a notional cap.
+        var scale = RiskScale();
+        var riskAmount = equity * (_cfg.RiskPerTradePct / 100m) * scale;
         var amount = riskAmount / stopDistance;
 
         // Notional ceilings.
-        var maxByPosition = _cfg.MaxNotionalPerPositionUsd / entryPrice;
-        var remainingTotal = _cfg.MaxTotalNotionalUsd - openNotional;
+        var maxByPosition = _cfg.MaxNotionalPerPositionUsd * scale / entryPrice;
+        var remainingTotal = _cfg.MaxTotalNotionalUsd * scale - openNotional;
         if (remainingTotal <= 0)
             return new SizingResult(false, 0, 0, 0, 0,
                 $"total open notional {openNotional:F2} already at the {_cfg.MaxTotalNotionalUsd} limit");
@@ -413,6 +468,11 @@ public sealed class RiskManager
         var previous = _entriesDay;
         _entriesDay = today;
         _entriesToday = 0;
+        if (_profitLockedDay is not null)
+        {
+            Log.Risk("UTC day rolled — profit lock released, full risk restored");
+            _profitLockedDay = null;
+        }
 
         if (equity > 0)
         {
@@ -479,6 +539,7 @@ public sealed class RiskManager
             SessionStartEquity = SessionStartEquity,
             PeakEquity = PeakEquity,
             CooldownUntilUtc = _cooldownUntil,
+            ProfitLockedDay = _profitLockedDay?.ToString("yyyy-MM-dd") ?? "",
         });
     }
 }
