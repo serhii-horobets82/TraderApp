@@ -310,6 +310,43 @@ public class HardRiskRulesTests
     }
 
     [Fact]
+    public void Consecutive_loss_halt_clears_on_restore_when_limit_raised()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "traderapp-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "session-state.json");
+
+        try
+        {
+            var cfg = new RiskConfig
+            {
+                PersistSessionState = true,
+                SessionStatePath = path,
+                MaxConsecutiveLosses = 3,
+                HaltOnConsecutiveLosses = true,
+            };
+            var first = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            first.InitialiseEquity(200m);
+            first.RecordTradeResult(false, -1m);
+            first.RecordTradeResult(false, -1m);
+            first.RecordTradeResult(false, -1m);
+            Assert.True(first.Halted);
+            Assert.Equal(3, first.ConsecutiveLosses);
+
+            cfg.MaxConsecutiveLosses = 10;
+            var second = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            second.RestoreOrInitialise(200m);
+            Assert.False(second.Halted);
+            Assert.Equal(3, second.ConsecutiveLosses);
+            Assert.True(second.CanOpenNewPosition("SUI_USDT", Array.Empty<Position>(), out _));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
     public void TickUtcDay_rebaselines_session_equity_when_not_halted()
     {
         var rm = Create(c =>

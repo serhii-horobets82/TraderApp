@@ -87,6 +87,19 @@ public sealed class RiskManager
             if (_haltKind == HaltKind.None)
                 _haltKind = InferKind(HaltReason);
             _haltedAtUtc = saved.HaltedAtUtc ?? DateTime.UtcNow;
+
+            // Limit was raised (e.g. 3 → 10): drop a consecutive-loss halt that
+            // no longer meets the configured threshold.
+            if (_haltKind == HaltKind.ConsecutiveLosses &&
+                _consecutiveLosses < _cfg.MaxConsecutiveLosses)
+            {
+                Log.Risk($"cleared consecutive-loss halt on restore: streak {_consecutiveLosses} " +
+                         $"< limit {_cfg.MaxConsecutiveLosses}");
+                Halted = false;
+                HaltReason = "";
+                _haltKind = HaltKind.None;
+                _haltedAtUtc = null;
+            }
         }
 
         if (saved.SessionStartEquity > 0)

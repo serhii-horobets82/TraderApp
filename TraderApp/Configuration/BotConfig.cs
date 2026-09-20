@@ -320,7 +320,7 @@ public sealed class RiskConfig
     public decimal MaxDailyProfitPct { get; set; } = 1.5m;
 
     /// <summary>Stop opening new positions after this many losses in a row.</summary>
-    public int MaxConsecutiveLosses { get; set; } = 3;
+    public int MaxConsecutiveLosses { get; set; } = 10;
 
     /// <summary>
     /// When true, hitting MaxConsecutiveLosses flattens the session (halt).
