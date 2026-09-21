@@ -137,7 +137,7 @@ nothing.
 |---|---|---|
 | Session drawdown | −2% from start equity | Flatten + halt |
 | Peak drawdown | −2% from session peak | Flatten + halt (protects winners from give-back) |
-| Daily profit lock | +1.5% session | Continue at `ProfitLockRiskScale` (×0.5) until UTC midnight; `0` halts instead |
+| Daily profit lock | +3% session | Continue at `ProfitLockRiskScale` (×0.5) until UTC midnight; `0` halts instead |
 | Consecutive losses | 10 | Hard halt (`HaltOnConsecutiveLosses`) |
 | Max concurrent | 1 | One position at a time |
 | Same-direction cap | 1 | No stacked longs/shorts across alts |
@@ -150,7 +150,7 @@ Set `HaltOnConsecutiveLosses` to `false` if you prefer a cooldown
 `MaxDailyProfitPct` / `MaxPeakDrawdownPct` to `0` to disable those locks.
 
 **Profit lock is a throttle, not a stop.** With `ProfitLockRiskScale: 0.5`, once
-the day is +1.5% the bot keeps trading at half `RiskPerTradePct` and half the
+the day is +3% the bot keeps trading at half `RiskPerTradePct` and half the
 notional caps for the rest of the UTC day, and the peak-drawdown rule (−2%
 from the high) still ends the day if the gains are given back. Set the scale to
 `0` to get the original "flatten and park until midnight" behaviour. The lock
@@ -199,7 +199,8 @@ The settings worth knowing:
 | `Risk.RiskPerTradePct` | `0.25` | Percent of equity lost if the stop is hit |
 | `Risk.MaxDailyDrawdownPct` | `2` | Session-start equity cutout |
 | `Risk.MaxPeakDrawdownPct` | `2` | Drawdown from session peak (0 = off) |
-| `Risk.MaxDailyProfitPct` | `1.5` | Green-day lock threshold (0 = off) |
+| `Risk.MaxDailyProfitPct` | `3` | Green-day lock threshold (0 = off). 1.5% was two winners at this R profile |
+| `Risk.MaxNotionalPerPositionUsd` | `80` | Must be ≥ what 0.25% risk sizes to (~70 USDT on SOL at 215 equity) or it silently clips the risk |
 | `Risk.ProfitLockRiskScale` | `0.5` | After the lock: keep trading at this risk scale; `0` halts for the day |
 | `Risk.WeekendRiskScale` | `0.5` | Risk multiplier on Saturday/Sunday UTC |
 | `Trading.EntryHoursUtcStart` / `End` | `6` / `22` | New entries only in this UTC window (equal = always) |
