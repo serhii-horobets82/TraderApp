@@ -88,6 +88,10 @@ public sealed class AutoTrader : IAsyncDisposable
     private DateTime _closedEntryBarOpen = DateTime.MinValue;
     private int _tick;
 
+    private decimal _lastEquity;
+    private IReadOnlyList<Position> _lastPositions = Array.Empty<Position>();
+    private DateTime _lastTickUtc;
+
     private readonly TradeJournal _journal;
     /// <summary>Signal context of the most recent entry order per market, attached to the position once it fills.</summary>
     private readonly Dictionary<string, (EntryContext Context, DateTime PlacedUtc)> _entryContext = new(StringComparer.OrdinalIgnoreCase);
@@ -339,6 +343,12 @@ public sealed class AutoTrader : IAsyncDisposable
         var positions = await _client.GetOpenPositionsAsync(null, ct);
         var equity = summary?.Equity ?? 0m;
 
+        // Snapshot for /status, so a Telegram command answers from memory
+        // instead of firing extra private API calls on demand.
+        _lastEquity = equity;
+        _lastPositions = positions;
+        _lastTickUtc = DateTime.UtcNow;
+
         // Digest before the day rolls inside CheckAccountHealth, so it reports
         // the day that just ended with the equity it ended on.
         MaybeSendDailyDigest(equity);
@@ -518,6 +528,79 @@ public sealed class AutoTrader : IAsyncDisposable
         : reason;
 
     /// <summary>ETH_USDT -> ETH. The quote currency is the same everywhere and just adds noise.</summary>
+    // ── Telegram command surface ────────────────────────────────────────
+
+    /// <summary>
+    /// /pause - stop taking new setups. Deliberately does NOT flip DryRun:
+    /// that would also stop the bot closing what it already holds, leaving an
+    /// open position with only the wider exchange-side stop under it.
+    /// </summary>
+    public string Pause()
+    {
+        var open = _lastPositions.Count(p => p.AbsAmount > 0 && p.BasePrice > 0);
+        if (!_risk.Pause())
+            return "⏸ Already paused. /resume to re-enable entries.";
+
+        return "⏸ Paused — no new entries.\n" +
+               (open > 0
+                   ? $"{open} open position(s) stay fully managed: stops, targets and the time stop still fire."
+                   : "No open positions.") +
+               "\nSurvives restarts. /resume to re-enable.";
+    }
+
+    /// <summary>/resume - allow new entries again.</summary>
+    public string Resume()
+    {
+        if (!_risk.Resume())
+            return "▶️ Not paused — entries are already enabled.";
+
+        return "▶️ Resumed — taking new setups again.\n" + DescribeStatus();
+    }
+
+    /// <summary>
+    /// Answers /status from the last tick's snapshot rather than issuing fresh
+    /// private calls, so hammering the command cannot eat the API budget the
+    /// trading loop depends on.
+    /// </summary>
+    public string DescribeStatus()
+    {
+        var age = _lastTickUtc == default ? "never" : $"{(DateTime.UtcNow - _lastTickUtc).TotalSeconds:F0}s ago";
+        var real = _lastPositions.Where(p => p.AbsAmount > 0 && p.BasePrice > 0).ToList();
+        var notional = real.Sum(p => p.AbsAmount * p.BasePrice);
+        var session = _risk.SessionStartEquity > 0 ? _lastEquity - _risk.SessionStartEquity : 0m;
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"{(_live ? "🟢" : "⚪")} {(_live ? "LIVE" : "DRY RUN")} · {BuildInfo.Display}\n");
+        sb.Append($"Balance  {_lastEquity:F2} USDT ({session:+0.00;-0.00} session)\n");
+        sb.Append($"Open     {real.Count}/{_cfg.Risk.MaxConcurrentPositions} · notional {notional:F2}\n");
+        sb.Append($"Pending  {_pending.Count} · last tick {age}\n");
+        if (_risk.Halted) sb.Append($"⛔ HALTED · {_risk.HaltReason}\n");
+        else if (_risk.EntriesPaused)
+        {
+            var since = _risk.PausedAtUtc is { } p ? $" for {(DateTime.UtcNow - p).TotalMinutes:F0}m" : "";
+            sb.Append($"⏸ PAUSED{since} · open positions still managed\n");
+        }
+        sb.Append($"Markets  {string.Join(" ", _cfg.Trading.Markets.Select(Short))}");
+        return sb.ToString();
+    }
+
+    /// <summary>Open positions with their live unrealised PnL, for /positions.</summary>
+    public string DescribePositions()
+    {
+        var real = _lastPositions.Where(p => p.AbsAmount > 0 && p.BasePrice > 0).ToList();
+        if (real.Count == 0) return "No open positions.";
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var p in real)
+        {
+            sb.Append($"{Short(p.Market)} {(p.IsLong ? "long" : "short")} {p.AbsAmount} @ {p.BasePrice}\n");
+            if (_managed.TryGetValue(p.PositionId, out var m))
+                sb.Append($"   stop {m.StopPrice} · tp {m.TakeProfitPrice} · best {m.MaxFavourableR:F2}R\n");
+            sb.Append($"   uPnL {p.UnrealizedPnl:+0.0000;-0.0000} USDT\n");
+        }
+        return sb.ToString().TrimEnd();
+    }
+
     private static string Short(string? market) =>
         market is null ? "?" : market.Replace("_USDT", "", StringComparison.OrdinalIgnoreCase);
 

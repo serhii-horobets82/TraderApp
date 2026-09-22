@@ -63,6 +63,16 @@ public sealed class RiskManager
     public int ConsecutiveLosses => _consecutiveLosses;
     public int EntriesToday => _entriesToday;
     public bool Halted { get; private set; }
+
+    /// <summary>
+    /// Manual pause. Blocks NEW entries only - open positions keep being
+    /// managed, so stops, targets and the time stop all still fire. That is the
+    /// difference between pausing and flipping DryRun: DryRun would also stop
+    /// the bot closing what it already holds, leaving only the wider
+    /// exchange-side stop between an open position and the market.
+    /// </summary>
+    public bool EntriesPaused { get; private set; }
+    public DateTime? PausedAtUtc { get; private set; }
     public string HaltReason { get; private set; } = "";
     public HaltKind Kind => _haltKind;
     public bool HaltClearsOnUtcDay => HaltKindRules.ClearsOnUtcDay(_haltKind);
@@ -109,6 +119,13 @@ public sealed class RiskManager
         if (!string.IsNullOrEmpty(saved.ProfitLockedDay) &&
             DateOnly.TryParse(saved.ProfitLockedDay, out var lockedDay))
             _profitLockedDay = lockedDay;
+
+        if (saved.EntriesPaused)
+        {
+            EntriesPaused = true;
+            PausedAtUtc = saved.PausedAtUtc ?? DateTime.UtcNow;
+            Log.Risk("restored PAUSED state - no new entries until /resume");
+        }
 
         if (saved.Halted)
         {
@@ -169,6 +186,29 @@ public sealed class RiskManager
         SessionStartEquity = equity;
         PeakEquity = equity;
         Persist();
+    }
+
+    /// <summary>Stop opening new positions. Existing ones stay managed.</summary>
+    public bool Pause()
+    {
+        if (EntriesPaused) return false;
+        EntriesPaused = true;
+        PausedAtUtc = DateTime.UtcNow;
+        Log.Risk("entries PAUSED by command - open positions stay managed");
+        Persist();
+        return true;
+    }
+
+    /// <summary>Allow new entries again.</summary>
+    public bool Resume()
+    {
+        if (!EntriesPaused) return false;
+        var since = PausedAtUtc is { } p ? DateTime.UtcNow - p : TimeSpan.Zero;
+        EntriesPaused = false;
+        PausedAtUtc = null;
+        Log.Risk($"entries RESUMED by command after {since.TotalMinutes:F0}m");
+        Persist();
+        return true;
     }
 
     public void Halt(string reason, HaltKind kind = HaltKind.None)
@@ -312,6 +352,8 @@ public sealed class RiskManager
         RollDayIfNeeded(now);
 
         if (Halted) { reason = $"halted: {HaltReason}"; return false; }
+
+        if (EntriesPaused) { reason = "paused (/resume to re-enable entries)"; return false; }
 
         if (!InsideEntryHours(_trading, now))
         {
@@ -540,6 +582,8 @@ public sealed class RiskManager
             PeakEquity = PeakEquity,
             CooldownUntilUtc = _cooldownUntil,
             ProfitLockedDay = _profitLockedDay?.ToString("yyyy-MM-dd") ?? "",
+            EntriesPaused = EntriesPaused,
+            PausedAtUtc = PausedAtUtc,
         });
     }
 }

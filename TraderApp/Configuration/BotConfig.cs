@@ -506,6 +506,15 @@ public sealed class TelegramConfig
     /// <summary>Periodic status message with equity and open positions. 0 disables.</summary>
     public int HeartbeatMinutes { get; set; } = 60;
 
+    /// <summary>
+    /// Accept commands (/status, /restart, ...) sent to the bot.
+    ///
+    /// Only messages from the configured ChatId are acted on - a Telegram bot is
+    /// reachable by anyone who finds its handle. Long polling also conflicts
+    /// across processes, so exactly one instance may have this enabled per token.
+    /// </summary>
+    public bool CommandsEnabled { get; set; } = true;
+
     /// <summary>One summary of the previous UTC day's trades at midnight, from the trade journal.</summary>
     public bool DailyDigest { get; set; } = true;
 

@@ -505,6 +505,72 @@ Logs are written to `bin/<config>/net10.0/logs/trader-YYYYMMDD.log`.
 
 ---
 
+## Controlling the bot from Telegram
+
+Send the bot a command; it replies in the same chat.
+
+| Command | What it does |
+|---|---|
+| `/status` | Mode, version, balance, open vs max positions, last tick age |
+| `/positions` | Each open position with its stop, target, best excursion and unrealised PnL |
+| `/pause` | Stop taking new setups. Open positions stay fully managed |
+| `/resume` | Take new setups again |
+| `/version` | Build number, commit and build time |
+| `/restart` | Graceful restart |
+| `/help` | Lists the registered commands |
+
+### How restart works
+
+`/restart` does not call the Railway API. It triggers the same graceful
+shutdown as SIGTERM - the loop finishes its cycle, resting entry orders are
+cancelled, queued Telegram messages flush - and then the process exits.
+Railway's `restartPolicyType: ALWAYS` brings it straight back on the current
+image, and systemd's `Restart=always` does the same on a VPS.
+
+That avoids storing a Railway API token in the container, which would carry
+rights over the whole project just to restart one service. Run locally with no
+supervisor and `/restart` simply stops the bot.
+
+Open positions are not closed. They keep the exchange-side OTO stop attached at
+entry and are re-adopted on boot.
+
+### What pause does, and does not, do
+
+`/pause` blocks **new entries only**. Everything already open keeps being
+managed - stops, targets, trailing, partial take and the time stop all still
+fire. It is the safe way to step back from a market without abandoning what you
+are holding.
+
+It deliberately does **not** flip `DryRun`. That would stop the bot sending any
+order at all, including exits, leaving an open position with nothing under it
+but the wider exchange-side stop. If you want that, set
+`TRADER_Trading__DryRun=true` in Railway variables and redeploy - but not while
+holding a position.
+
+The pause is written to `data/session-state.json`, so a redeploy or crash cannot
+silently resume trading on a bot you paused on purpose. Unlike the day-scoped
+profit and drawdown locks it never clears itself; only `/resume` does.
+
+### Security
+
+Only messages from the configured `Telegram.ChatId` are acted on. A Telegram
+bot is reachable by anyone who finds its handle, so without that check a
+stranger could restart a bot trading real money; commands from any other chat
+are dropped and logged once.
+
+Telegram long polling is exclusive per token: if two instances have
+`CommandsEnabled` at once, Telegram answers 409 and the second logs a warning
+and stops listening. Keep it enabled on one instance only - if you run a local
+copy alongside Railway, set `TRADER_Telegram__CommandsEnabled=false` locally.
+
+Set `Telegram.CommandsEnabled: false` to turn the listener off entirely.
+
+Commands queued while the bot is down are **discarded on startup** rather than
+replayed. Without that, a `/restart` sent while it was offline would fire on
+boot and restart it again, forever.
+
+---
+
 ## Deploying to Railway (no VPS)
 
 Railway runs the bot as a container and redeploys on every push to `main`.

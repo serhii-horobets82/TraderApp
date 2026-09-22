@@ -110,6 +110,26 @@ internal static class Program
             RequestShutdown("Ctrl+C");
         };
 
+        // ── Telegram commands ────────────────────────────────────────────
+        // "Restart" is just a graceful exit: Railway's restartPolicyType
+        // ALWAYS (and systemd's Restart=always) brings the process straight
+        // back on the current image. That needs no Railway API token, which
+        // would otherwise have to be stored here with rights over the whole
+        // project. Run locally without a supervisor and /restart simply stops.
+        await using var commands = new TelegramCommandListener(config.Telegram, telegram.Send);
+
+        commands.On("/restart", () =>
+        {
+            RequestShutdown("Telegram /restart");
+            return "♻️ Restarting. Open positions keep their exchange-side stop and are re-adopted on boot.";
+        });
+
+        commands.On("/version", () => $"{BuildInfo.Display}\nbuilt {BuildInfo.BuiltUtc} UTC");
+
+        commands.On("/help", () =>
+            "Commands:\n" +
+            string.Join("\n", commands.Commands.OrderBy(c => c)));
+
         // Containers and orchestrators stop a process with SIGTERM, which
         // Console.CancelKeyPress does not see. Without this the bot is killed
         // mid-cycle: resting entry orders are never cancelled and queued
@@ -122,6 +142,11 @@ internal static class Program
 
         try
         {
+            // Polling runs alongside the trader. It is deliberately not awaited
+            // together with it: a command listener that died must never stop the
+            // trading loop, and the loop finishing must not wait on a 30s poll.
+            var listening = commands.RunAsync(cts.Token);
+
             if (signalsOnly)
             {
                 await new SignalMonitor(config, client).RunAsync(cts.Token);
@@ -129,8 +154,16 @@ internal static class Program
             else
             {
                 await using var trader = new AutoTrader(config, client, telegram);
+                commands.On("/status", () => trader.DescribeStatus());
+                commands.On("/positions", () => trader.DescribePositions());
+                commands.On("/pause", () => trader.Pause());
+                commands.On("/resume", () => trader.Resume());
                 await trader.RunAsync(cts.Token);
             }
+
+            // The listener is cooperative and swallows its own errors; once the
+            // trading loop is done the process is about to exit anyway.
+            _ = listening;
         }
         catch (InvalidOperationException ex)
         {

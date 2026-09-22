@@ -20,4 +20,12 @@ public sealed class SessionState
 
     /// <summary>UTC day (yyyy-MM-dd) on which the profit lock switched to reduced risk. Empty = not locked.</summary>
     public string ProfitLockedDay { get; set; } = "";
+
+    /// <summary>
+    /// Manual pause from /pause. Persisted deliberately: otherwise a redeploy
+    /// would silently resume trading on a bot someone had paused on purpose.
+    /// Unlike the day-scoped locks it never clears itself - only /resume does.
+    /// </summary>
+    public bool EntriesPaused { get; set; }
+    public DateTime? PausedAtUtc { get; set; }
 }
