@@ -523,9 +523,22 @@ Send the bot a command; it replies in the same chat.
 
 `/restart` does not call the Railway API. It triggers the same graceful
 shutdown as SIGTERM - the loop finishes its cycle, resting entry orders are
-cancelled, queued Telegram messages flush - and then the process exits.
-Railway's `restartPolicyType: ALWAYS` brings it straight back on the current
-image, and systemd's `Restart=always` does the same on a VPS.
+cancelled, queued Telegram messages flush - and then the process **exits with
+code 75**.
+
+The non-zero code is load-bearing. Railway's `ALWAYS` restart policy is **not
+available on Free or Trial plans**: those silently fall back to the default
+`ON_FAILURE`, which restarts only on a non-zero exit. A clean exit 0 leaves the
+deployment "Completed" and stopped - which is exactly what happened the first
+time this was tried. Exiting 75 restarts under `ON_FAILURE` and `ALWAYS` alike,
+and systemd's `Restart=always` covers it on a VPS.
+
+A genuine stop still exits 0: SIGTERM from a deploy, or Ctrl+C, is the platform
+asking the process to go away, not a request to come back.
+
+Note that `ON_FAILURE` is capped at **10 restarts on Free/Trial**, so `/restart`
+is not something to use in a loop. After that Railway leaves the service down
+until you redeploy or restart it from the dashboard.
 
 That avoids storing a Railway API token in the container, which would carry
 rights over the whole project just to restart one service. Run locally with no

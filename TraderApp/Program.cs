@@ -97,9 +97,24 @@ internal static class Program
 
         var stopReason = "finished";
 
-        void RequestShutdown(string source)
+        // Exit code for a restart the operator asked for.
+        //
+        // Railway's ALWAYS restart policy is not available on Free/Trial plans;
+        // those silently fall back to the default ON_FAILURE, which only
+        // restarts on a NON-ZERO exit. Exiting 0 after /restart therefore left
+        // the service "Completed" and stopped. Exiting non-zero restarts under
+        // ON_FAILURE and ALWAYS alike, and systemd's Restart=always covers it
+        // too - so this works on every host without depending on the plan.
+        //
+        // A genuine stop (SIGTERM from a deploy, Ctrl+C) still exits 0: that is
+        // Railway asking the process to go away, not a request to come back.
+        const int exitRestartRequested = 75;
+        var restartRequested = false;
+
+        void RequestShutdown(string source, bool restart = false)
         {
             stopReason = source;
+            restartRequested |= restart;
             Log.Warn($"shutdown requested ({source}) - finishing the current cycle");
             if (!cts.IsCancellationRequested) cts.Cancel();
         }
@@ -111,16 +126,18 @@ internal static class Program
         };
 
         // ── Telegram commands ────────────────────────────────────────────
-        // "Restart" is just a graceful exit: Railway's restartPolicyType
-        // ALWAYS (and systemd's Restart=always) brings the process straight
-        // back on the current image. That needs no Railway API token, which
-        // would otherwise have to be stored here with rights over the whole
-        // project. Run locally without a supervisor and /restart simply stops.
+        // "Restart" is a graceful exit with a non-zero code, which the
+        // supervisor turns into a restart on the current image. No Railway API
+        // token is needed, which would otherwise have to live in the container
+        // with rights over the whole project.
+        //
+        // The non-zero code is load-bearing: see exitRestartRequested above.
+        // Run locally without a supervisor and /restart simply stops the bot.
         await using var commands = new TelegramCommandListener(config.Telegram, telegram.Send);
 
         commands.On("/restart", () =>
         {
-            RequestShutdown("Telegram /restart");
+            RequestShutdown("Telegram /restart", restart: true);
             return "♻️ Restarting. Open positions keep their exchange-side stop and are re-adopted on boot.";
         });
 
@@ -183,7 +200,8 @@ internal static class Program
             // That is not an outage — the new replica already sent Started.
             // Alert Telegram and fail the watchdog only when this process
             // died unexpectedly, so a missed ping still covers hard kills.
-            var planned = stopReason is "Railway/SIGTERM" or "Ctrl+C" or "finished";
+            var planned = restartRequested
+                          || stopReason is "Railway/SIGTERM" or "Ctrl+C" or "finished";
             if (!planned)
             {
                 await telegram.SendNowAsync($"TraderApp is down ({stopReason}).");
@@ -195,12 +213,13 @@ internal static class Program
                     "TraderApp stopped (Ctrl+C). Open positions keep their exchange stop.");
             }
 
-            Log.Info($"stopped ({stopReason})");
+            Log.Info($"stopped ({stopReason})"
+                     + (restartRequested ? $" - exiting {exitRestartRequested} so the supervisor restarts us" : ""));
             Log.SetNotifier(null);
             Log.Close();
         }
 
-        return 0;
+        return restartRequested ? exitRestartRequested : 0;
     }
 
     private static readonly HashSet<string> KnownFlags = new(StringComparer.OrdinalIgnoreCase)

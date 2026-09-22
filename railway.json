@@ -3,7 +3,6 @@
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile",
-
     "_comment_watch": "Only these paths trigger a redeploy. A redeploy restarts the bot, and while it is down the bot-managed stop is not enforced - only the exchange-side OTO stop is. There is no reason to take that window for a README edit.",
     "watchPatterns": [
       "TraderApp/**",
@@ -13,10 +12,9 @@
     ]
   },
   "deploy": {
-    "_comment_restart": "ALWAYS: the bot re-adopts open positions on startup, so a restart is recoverable; being down is not.",
+    "_comment_restart": "ALWAYS is ignored on Free/Trial plans, which fall back to the default ON_FAILURE and only restart on a NON-ZERO exit. /restart therefore exits 75 rather than 0 so it works on either policy. Raise the plan and ALWAYS starts applying; nothing else needs to change.",
     "restartPolicyType": "ALWAYS",
     "restartPolicyMaxRetries": 10,
-
     "_comment_healthcheck": "Deliberately no healthcheckPath. This is a worker with no HTTP listener - setting one would fail every deploy. Liveness is the Telegram heartbeat."
   }
 }
