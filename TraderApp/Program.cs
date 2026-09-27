@@ -63,7 +63,11 @@ internal static class Program
         if (signalsOnly)
         {
             // Public endpoints only - credentials are irrelevant here.
-            errors = errors.Where(e => !e.StartsWith("Api.", StringComparison.Ordinal)).ToList();
+            errors = errors
+                .Where(e => !e.StartsWith("Api.", StringComparison.Ordinal)
+                            && !e.StartsWith("Bybit.Key", StringComparison.Ordinal)
+                            && !e.StartsWith("Bybit.Secret", StringComparison.Ordinal))
+                .ToList();
         }
         if (errors.Count > 0)
         {
@@ -80,10 +84,18 @@ internal static class Program
         config.Trading.IUnderstandThisTradesRealMoney = true;
         var live = !signalsOnly && !dryRun;
 
-        PrintBanner(config, live, signalsOnly);
+        ExchangeMode exchangeMode;
+        try { exchangeMode = config.ResolveExchangeMode(); }
+        catch (ArgumentException ex)
+        {
+            Log.Error(ex.Message);
+            return 1;
+        }
+
+        PrintBanner(config, live, signalsOnly, exchangeMode);
 
         using var cts = new CancellationTokenSource();
-        using var client = new WhiteBitClient(config.Api);
+        var venues = VenueHost.Build(config, exchangeMode);
         await using var telegram = new TelegramNotifier(config.Telegram);
         if (telegram.IsConfigured)
         {
@@ -157,6 +169,7 @@ internal static class Program
             RequestShutdown("Railway/SIGTERM");
         });
 
+        var traders = new List<AutoTrader>();
         try
         {
             // Polling runs alongside the trader. It is deliberately not awaited
@@ -166,16 +179,41 @@ internal static class Program
 
             if (signalsOnly)
             {
-                await new SignalMonitor(config, client).RunAsync(cts.Token);
+                var monitors = venues.Select(v =>
+                {
+                    Log.Info($"[{v.Label}] signals-only on {string.Join(", ", v.Config.Trading.Markets)}");
+                    return new SignalMonitor(v.Config, v.Client).RunAsync(cts.Token);
+                });
+                await Task.WhenAll(monitors);
             }
             else
             {
-                await using var trader = new AutoTrader(config, client, telegram);
-                commands.On("/status", () => trader.DescribeStatus());
-                commands.On("/positions", () => trader.DescribePositions());
-                commands.On("/pause", () => trader.Pause());
-                commands.On("/resume", () => trader.Resume());
-                await trader.RunAsync(cts.Token);
+                var runs = new List<Task>();
+                foreach (var (label, venueCfg, client) in venues)
+                {
+                    Log.Info($"[{label}] starting runner · markets {string.Join(", ", venueCfg.Trading.Markets)}");
+                    var trader = new AutoTrader(venueCfg, client, telegram);
+                    traders.Add(trader);
+                    runs.Add(trader.RunAsync(cts.Token));
+                }
+
+                if (traders.Count == 1)
+                {
+                    var trader = traders[0];
+                    commands.On("/status", () => trader.DescribeStatus());
+                    commands.On("/positions", () => trader.DescribePositions());
+                    commands.On("/pause", () => trader.Pause());
+                    commands.On("/resume", () => trader.Resume());
+                }
+                else
+                {
+                    commands.On("/status", () => string.Join("\n───\n", traders.Select(t => t.DescribeStatus())));
+                    commands.On("/positions", () => string.Join("\n───\n", traders.Select(t => t.DescribePositions())));
+                    commands.On("/pause", () => string.Join("\n", traders.Select(t => t.Pause())));
+                    commands.On("/resume", () => string.Join("\n", traders.Select(t => t.Resume())));
+                }
+
+                await Task.WhenAll(runs);
             }
 
             // The listener is cooperative and swallows its own errors; once the
@@ -196,6 +234,15 @@ internal static class Program
         }
         finally
         {
+            foreach (var t in traders)
+            {
+                try { await t.DisposeAsync(); } catch { /* best effort */ }
+            }
+            foreach (var (_, _, client) in venues)
+            {
+                try { client.Dispose(); } catch { /* best effort */ }
+            }
+
             // Railway sends SIGTERM to the outgoing replica on every deploy.
             // That is not an outage — the new replica already sent Started.
             // Alert Telegram and fail the watchdog only when this process
@@ -238,9 +285,11 @@ internal static class Program
 
         var cfg = builder.Build().Get<BotConfig>() ?? new BotConfig();
 
-        // Convenience aliases so the usual WhiteBIT variable names work too.
+        // Convenience aliases so the usual WhiteBIT / Bybit variable names work too.
         cfg.Api.Key = FirstNonEmpty(cfg.Api.Key, Environment.GetEnvironmentVariable("WHITEBIT_API_KEY"));
         cfg.Api.Secret = FirstNonEmpty(cfg.Api.Secret, Environment.GetEnvironmentVariable("WHITEBIT_API_SECRET"));
+        cfg.Bybit.Key = FirstNonEmpty(cfg.Bybit.Key, Environment.GetEnvironmentVariable("BYBIT_API_KEY"));
+        cfg.Bybit.Secret = FirstNonEmpty(cfg.Bybit.Secret, Environment.GetEnvironmentVariable("BYBIT_API_SECRET"));
         cfg.Telegram.BotToken = FirstNonEmpty(cfg.Telegram.BotToken, Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
         cfg.Telegram.ChatId = FirstNonEmpty(cfg.Telegram.ChatId, Environment.GetEnvironmentVariable("TELEGRAM_CHAT_ID"));
         cfg.Telegram.WatchdogPingUrl = FirstNonEmpty(cfg.Telegram.WatchdogPingUrl,
@@ -250,6 +299,8 @@ internal static class Program
         // trailing whitespace, which silently breaks HMAC signing.
         cfg.Api.Key = cfg.Api.Key.Trim();
         cfg.Api.Secret = cfg.Api.Secret.Trim();
+        cfg.Bybit.Key = cfg.Bybit.Key.Trim();
+        cfg.Bybit.Secret = cfg.Bybit.Secret.Trim();
         cfg.Telegram.BotToken = cfg.Telegram.BotToken.Trim();
         cfg.Telegram.ChatId = cfg.Telegram.ChatId.Trim();
 
@@ -259,7 +310,7 @@ internal static class Program
     private static string FirstNonEmpty(string? a, string? b) =>
         !string.IsNullOrWhiteSpace(a) ? a : (b ?? "");
 
-    private static void PrintBanner(BotConfig c, bool live, bool signalsOnly)
+    private static void PrintBanner(BotConfig c, bool live, bool signalsOnly, ExchangeMode mode)
     {
         Console.WriteLine();
         Console.WriteLine($"  TraderApp {BuildInfo.Display}");
@@ -271,8 +322,20 @@ internal static class Program
                 ? "  MODE          : LIVE - real orders, real money"
                 : "  MODE          : DRY RUN - decisions logged, nothing sent");
         Console.ResetColor();
-        Console.WriteLine($"  Endpoint      : {c.Api.BaseUrl}");
-        Console.WriteLine($"  Markets       : {string.Join(", ", c.Trading.Markets)}");
+        Console.WriteLine($"  Exchange      : {mode}");
+        if (mode is ExchangeMode.WhiteBIT or ExchangeMode.Both)
+        {
+            Console.WriteLine($"  WhiteBIT      : {c.Api.BaseUrl}");
+            Console.WriteLine($"  WB markets    : {string.Join(", ", c.Trading.Markets)}");
+        }
+        if (mode is ExchangeMode.Bybit or ExchangeMode.Both)
+        {
+            var bbMarkets = c.Bybit.Markets.Count > 0
+                ? c.Bybit.Markets
+                : c.Trading.Markets.Select(m => m.Replace("_", "", StringComparison.Ordinal)).ToList();
+            Console.WriteLine($"  Bybit         : {c.Bybit.BaseUrl} ({c.Bybit.Category})");
+            Console.WriteLine($"  BB markets    : {string.Join(", ", bbMarkets)}");
+        }
         Console.WriteLine($"  Timeframes    : {c.Trading.EntryInterval} entry / {c.Trading.RegimeInterval} regime");
         Console.WriteLine($"  Leverage      : {c.Trading.Leverage}x");
         Console.WriteLine($"  Risk/trade    : {c.Risk.RiskPerTradePct}% of equity" +

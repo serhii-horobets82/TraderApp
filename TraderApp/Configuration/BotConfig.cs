@@ -1,4 +1,17 @@
+using TraderApp.Notifications;
+
 namespace TraderApp.Configuration;
+
+/// <summary>
+/// Which venues the process should run. Default WhiteBIT keeps existing
+/// deploys unchanged: Api.* / WHITEBIT_* credentials and Trading.Markets.
+/// </summary>
+public enum ExchangeMode
+{
+    WhiteBIT = 0,
+    Bybit = 1,
+    Both = 2
+}
 
 /// <summary>
 /// Root configuration. Bound from appsettings.json, then overridden by
@@ -8,21 +21,60 @@ namespace TraderApp.Configuration;
 public sealed class BotConfig
 {
     public ApiConfig Api { get; set; } = new();
+    public BybitConfig Bybit { get; set; } = new();
     public TradingConfig Trading { get; set; } = new();
     public SignalConfig Signals { get; set; } = new();
     public RiskConfig Risk { get; set; } = new();
     public TelegramConfig Telegram { get; set; } = new();
 
+    public ExchangeMode ResolveExchangeMode()
+    {
+        if (string.IsNullOrWhiteSpace(Trading.ExchangeMode)) return ExchangeMode.WhiteBIT;
+        return Trading.ExchangeMode.Trim().ToLowerInvariant() switch
+        {
+            "whitebit" or "wb" or "white-bit" => ExchangeMode.WhiteBIT,
+            "bybit" or "bb" => ExchangeMode.Bybit,
+            "both" or "all" or "parallel" => ExchangeMode.Both,
+            _ => throw new ArgumentException(
+                $"Trading.ExchangeMode \"{Trading.ExchangeMode}\" is invalid. Use WhiteBIT, Bybit, or Both.")
+        };
+    }
+
     public IReadOnlyList<string> Validate()
     {
         var errors = new List<string>();
 
-        if (string.IsNullOrWhiteSpace(Api.Key))
-            errors.Add("Api.Key is empty. Set TRADER_Api__Key or WHITEBIT_API_KEY.");
-        if (string.IsNullOrWhiteSpace(Api.Secret))
-            errors.Add("Api.Secret is empty. Set TRADER_Api__Secret or WHITEBIT_API_SECRET.");
-        if (Trading.Markets.Count == 0)
-            errors.Add("Trading.Markets is empty.");
+        ExchangeMode mode;
+        try { mode = ResolveExchangeMode(); }
+        catch (ArgumentException ex)
+        {
+            errors.Add(ex.Message);
+            return errors;
+        }
+
+        var needWhiteBit = mode is ExchangeMode.WhiteBIT or ExchangeMode.Both;
+        var needBybit = mode is ExchangeMode.Bybit or ExchangeMode.Both;
+
+        if (needWhiteBit)
+        {
+            if (string.IsNullOrWhiteSpace(Api.Key))
+                errors.Add("Api.Key is empty. Set TRADER_Api__Key or WHITEBIT_API_KEY.");
+            if (string.IsNullOrWhiteSpace(Api.Secret))
+                errors.Add("Api.Secret is empty. Set TRADER_Api__Secret or WHITEBIT_API_SECRET.");
+            if (Trading.Markets.Count == 0)
+                errors.Add("Trading.Markets is empty.");
+        }
+
+        if (needBybit)
+        {
+            if (string.IsNullOrWhiteSpace(Bybit.Key))
+                errors.Add("Bybit.Key is empty. Set TRADER_Bybit__Key or BYBIT_API_KEY.");
+            if (string.IsNullOrWhiteSpace(Bybit.Secret))
+                errors.Add("Bybit.Secret is empty. Set TRADER_Bybit__Secret or BYBIT_API_SECRET.");
+            if (Bybit.Markets.Count == 0 && Trading.Markets.Count == 0)
+                errors.Add("Bybit.Markets is empty (and Trading.Markets has nothing to map).");
+        }
+
         if (Trading.Leverage is < 1 or > 20)
             errors.Add("Trading.Leverage must be between 1 and 20.");
         if (Risk.RiskPerTradePct is <= 0 or > 2m)
@@ -60,7 +112,7 @@ public sealed class BotConfig
         if (Telegram.Enabled && string.IsNullOrWhiteSpace(Telegram.BotToken))
             errors.Add("Telegram.Enabled is true but Telegram.BotToken is empty. Set TRADER_Telegram__BotToken or TELEGRAM_BOT_TOKEN.");
         if (Telegram.Enabled && !string.IsNullOrWhiteSpace(Telegram.ChatId)
-                             && !Notifications.TelegramNotifier.LooksLikeChatId(Telegram.ChatId))
+                             && !TelegramNotifier.LooksLikeChatId(Telegram.ChatId))
             errors.Add($"Telegram.ChatId is not a valid chat id: \"{Telegram.ChatId}\". It must be a number " +
                        "(e.g. 123456789 or -1001234567890) or an @channelusername. Check appsettings.json - " +
                        "its value is used unless empty, in which case TELEGRAM_CHAT_ID is read instead.");
@@ -85,12 +137,36 @@ public sealed class ApiConfig
     public int MaxRetries { get; set; } = 3;
 }
 
+/// <summary>
+/// Bybit USDT linear perps. Opt-in: leave Key/Secret empty and ExchangeMode at
+/// WhiteBIT (default) and nothing Bybit-related is touched.
+/// </summary>
+public sealed class BybitConfig
+{
+    public string Key { get; set; } = "";
+    public string Secret { get; set; } = "";
+
+    /// <summary>https://api.bybit.com or https://api-testnet.bybit.com</summary>
+    public string BaseUrl { get; set; } = "https://api.bybit.com";
+
+    /// <summary>V5 category. Only linear is implemented.</summary>
+    public string Category { get; set; } = "linear";
+
+    public int HttpTimeoutSeconds { get; set; } = 15;
+    public int MaxRetries { get; set; } = 3;
+    public int RecvWindowMs { get; set; } = 5_000;
+
+    /// <summary>
+    /// Must start empty: the configuration binder appends to a pre-populated
+    /// list instead of replacing it. Symbols use Bybit form (SOLUSDT).
+    /// When empty and ExchangeMode includes Bybit, Trading.Markets are mapped
+    /// by stripping underscores (SOL_USDT → SOLUSDT).
+    /// </summary>
+    public List<string> Markets { get; set; } = new();
+}
+
 public sealed class TradingConfig
 {
-    /// <summary>
-    /// When true the bot computes and logs every decision but sends no order-placing
-    /// or position-closing request. This is the default and must be turned off deliberately.
-    /// </summary>
     /// <summary>When true, decisions are logged but no orders are sent. Default is live.</summary>
     public bool DryRun { get; set; }
 
@@ -98,8 +174,15 @@ public sealed class TradingConfig
     public bool IUnderstandThisTradesRealMoney { get; set; } = true;
 
     /// <summary>
+    /// WhiteBIT | Bybit | Both. Empty / omitted = WhiteBIT so existing deploys
+    /// keep a single WhiteBIT runner with Api.* credentials.
+    /// </summary>
+    public string ExchangeMode { get; set; } = "WhiteBIT";
+
+    /// <summary>
     /// Must start empty: the configuration binder appends to a pre-populated
     /// list instead of replacing it, which silently duplicates every default.
+    /// WhiteBIT symbols (SOL_USDT). Ignored for Bybit-only mode when Bybit.Markets is set.
     /// </summary>
     public List<string> Markets { get; set; } = new();
 
