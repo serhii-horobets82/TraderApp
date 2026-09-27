@@ -90,6 +90,7 @@ public class StandAsideTests
     {
         Assert.Equal("SOL_PERP", StandAsideRules.PerpTicker("SOL_USDT"));
         Assert.Equal("AAVE_PERP", StandAsideRules.PerpTicker("AAVE_USDT"));
+        Assert.Equal("SOLUSDT", StandAsideRules.PerpTicker("SOLUSDT"));
         Assert.Null(StandAsideRules.PerpTicker("SOLBTC"));
     }
 }
