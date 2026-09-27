@@ -1,7 +1,8 @@
-# TraderApp — WhiteBIT collateral scalper
+# TraderApp — multi-venue collateral / linear scalper
 
-An auto-trading bot for WhiteBIT collateral (margin) markets. It scores a set of
-common technical signals, sizes positions from a risk budget rather than a fixed
+An auto-trading bot for **WhiteBIT collateral** markets (default) with optional
+**Bybit USDT linear** runners in the same process. It scores a set of common
+technical signals, sizes positions from a risk budget rather than a fixed
 notional, and manages exits with a break-even move, an ATR trailing stop and a
 time stop — with an exchange-side stop attached to every entry so a position is
 never unprotected.
@@ -9,6 +10,17 @@ never unprotected.
 > This is trading software, not trading advice. It can lose money. Run it in
 > `--signals-only` and then dry-run for long enough to believe the behaviour
 > before you give it an API key with trade permission.
+
+### Venues
+
+| `Trading.ExchangeMode` | What runs |
+|---|---|
+| `WhiteBIT` (default) | Existing WhiteBIT behaviour — same `Api.*` / `WHITEBIT_*` keys and `Trading.Markets` |
+| `Bybit` | Bybit linear only — `Bybit.*` / `BYBIT_*` keys and `Bybit.Markets` (`SOLUSDT` form) |
+| `Both` | Two parallel `AutoTrader` loops, separate equity / session / journal files |
+
+WhiteBIT stays the default: if you never set Bybit keys or change `ExchangeMode`,
+nothing about the live WhiteBIT bot changes.
 
 ---
 
@@ -51,6 +63,17 @@ setx WHITEBIT_API_SECRET "your-secret-key"
 `TRADER_Api__Key` / `TRADER_Api__Secret` work too, as does a git-ignored
 `appsettings.local.json`. Give the key **trade** permission only — never
 withdrawal — and IP-allowlist it in the WhiteBIT UI.
+
+**Bybit (optional):** set `Trading.ExchangeMode` to `Bybit` or `Both`, then:
+
+```bash
+setx BYBIT_API_KEY "your-key"
+setx BYBIT_API_SECRET "your-secret"
+```
+
+or `TRADER_Bybit__Key` / `TRADER_Bybit__Secret`. Use Unified Trading Account
+linear perps. Bybit session state lands in `data/session-state-bybit.json` so a
+WhiteBIT halt file is never overwritten.
 
 ---
 

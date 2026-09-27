@@ -36,8 +36,10 @@ public sealed class ApiException : Exception
 ///  - non-2xx responses throw instead of silently returning default(T), so a
 ///    failed cancel can never be mistaken for a successful one.
 /// </summary>
-public sealed class WhiteBitClient : IDisposable
+public sealed class WhiteBitClient : IExchangeClient
 {
+    public string ExchangeId => "WhiteBIT";
+
     /// <summary>
     /// All responses are read with <see cref="LenientDecimalConverter"/>: WhiteBIT
     /// returns null for numeric fields that are not yet meaningful, and a throw
@@ -236,25 +238,7 @@ public sealed class WhiteBitClient : IDisposable
     }
 
     /// <summary>Converts a WhiteBIT kline interval (1s, 5m, 4h, 1d, 1w, 1M) to a duration.</summary>
-    internal static TimeSpan ParseInterval(string interval)
-    {
-        if (string.IsNullOrWhiteSpace(interval) || interval.Length < 2) return TimeSpan.Zero;
-
-        var unit = interval[^1];
-        if (!int.TryParse(interval[..^1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) || n <= 0)
-            return TimeSpan.Zero;
-
-        return unit switch
-        {
-            's' => TimeSpan.FromSeconds(n),
-            'm' => TimeSpan.FromMinutes(n),
-            'h' => TimeSpan.FromHours(n),
-            'd' => TimeSpan.FromDays(n),
-            'w' => TimeSpan.FromDays(7 * n),
-            'M' => TimeSpan.FromDays(30 * n),
-            _ => TimeSpan.Zero
-        };
-    }
+    internal static TimeSpan ParseInterval(string interval) => CandleInterval.Parse(interval);
 
     private sealed class KlineEnvelope
     {
@@ -268,6 +252,9 @@ public sealed class WhiteBitClient : IDisposable
     /// <summary>POST /api/v4/collateral-account/summary</summary>
     public Task<CollateralSummary?> GetCollateralSummaryAsync(CancellationToken ct) =>
         PostAsync<CollateralSummary>("/api/v4/collateral-account/summary", new Payload(), ct);
+
+    public Task<CollateralSummary?> GetAccountSummaryAsync(CancellationToken ct) =>
+        GetCollateralSummaryAsync(ct);
 
     /// <summary>POST /api/v4/collateral-account/positions/open</summary>
     public async Task<IReadOnlyList<Position>> GetOpenPositionsAsync(string? market, CancellationToken ct)
@@ -301,9 +288,35 @@ public sealed class WhiteBitClient : IDisposable
     public Task<OrderResponse?> PlaceCollateralLimitAsync(CollateralLimitOrderPayload p, CancellationToken ct) =>
         PostAsync<OrderResponse>("/api/v4/order/collateral/limit", p, ct);
 
+    public Task<OrderResponse?> PlaceEntryLimitAsync(EntryLimitRequest request, CancellationToken ct) =>
+        PlaceCollateralLimitAsync(new CollateralLimitOrderPayload
+        {
+            Market = request.Market,
+            Side = request.Side,
+            Amount = request.Amount,
+            Price = request.Price,
+            ClientOrderId = request.ClientOrderId,
+            StopLoss = request.StopLoss,
+            TakeProfit = request.TakeProfit,
+            PostOnly = request.PostOnly ? true : null,
+            Stp = "co"
+        }, ct);
+
     /// <summary>POST /api/v4/order/collateral/market</summary>
     public Task<OrderResponse?> PlaceCollateralMarketAsync(CollateralMarketOrderPayload p, CancellationToken ct) =>
         PostAsync<OrderResponse>("/api/v4/order/collateral/market", p, ct);
+
+    public Task<OrderResponse?> PlaceReduceOnlyMarketAsync(ReduceOnlyMarketRequest request, CancellationToken ct) =>
+        PlaceCollateralMarketAsync(new CollateralMarketOrderPayload
+        {
+            Market = request.Market,
+            Side = request.Side,
+            Amount = request.Amount,
+            ClientOrderId = request.ClientOrderId,
+            ReduceOnly = true,
+            PositionSide = request.PositionSide,
+            Stp = "co"
+        }, ct);
 
     /// <summary>
     /// POST /api/v4/collateral-account/position/close - closes at market and

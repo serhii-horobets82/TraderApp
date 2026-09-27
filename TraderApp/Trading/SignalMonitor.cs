@@ -12,11 +12,11 @@ namespace TraderApp.Trading;
 public sealed class SignalMonitor
 {
     private readonly BotConfig _cfg;
-    private readonly WhiteBitClient _client;
+    private readonly IExchangeClient _client;
     private readonly SignalEngine _engine;
     private readonly StandAsideReader _standAside;
 
-    public SignalMonitor(BotConfig cfg, WhiteBitClient client)
+    public SignalMonitor(BotConfig cfg, IExchangeClient client)
     {
         _cfg = cfg;
         _client = client;
