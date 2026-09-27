@@ -608,7 +608,7 @@ public sealed class AutoTrader : IAsyncDisposable
 
     private sealed record ScannedEntry(
         TradeSignal Signal, OrderBook Book, MarketRules Rules, decimal EntryPrice, SizingResult Sizing,
-        StandAsideSnapshot? Aside);
+        StandAsideSnapshot? Aside, decimal ConvictionScale);
 
     private async Task ConsiderEntriesAsync(
         decimal equity, decimal openNotional, IReadOnlyList<Position> positions, CancellationToken ct)
@@ -770,7 +770,9 @@ public sealed class AutoTrader : IAsyncDisposable
             entryPrice = isLong ? rules.CeilPrice(reference) : rules.FloorPrice(reference);
         }
 
-        var sizing = _risk.Size(isLong, entryPrice, signal.Atr, equity, openNotional, rules);
+        var conviction = RiskManager.ConvictionScale(
+            signal.Score, _cfg.Signals.MinScore, _cfg.Risk.ConvictionRiskFloor);
+        var sizing = _risk.Size(isLong, entryPrice, signal.Atr, equity, openNotional, rules, conviction);
         if (!sizing.Allowed)
         {
             if (ShouldLogSizingReject(market))
@@ -778,7 +780,7 @@ public sealed class AutoTrader : IAsyncDisposable
             return null;
         }
 
-        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside);
+        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside, conviction);
     }
 
     private bool ShouldLogSizingReject(string market)
@@ -805,14 +807,17 @@ public sealed class AutoTrader : IAsyncDisposable
             $"stop {rules.FormatPriceRaw(sizing.StopPrice)} " +
             $"tp {rules.FormatPriceRaw(sizing.TakeProfitPrice)} " +
             $"hardStop {rules.FormatPriceRaw(sizing.HardStopPrice)} | " +
-            $"risk {riskQuote:F2} | {signal.Explain()}");
+            $"risk {riskQuote:F2} | conv x{scanned.ConvictionScale:0.##} | {signal.Explain()}");
 
         foreach (var c in signal.Components.Where(c => c.Weight > 0))
             Log.Info($"    {c.Name,-10} {c.Direction,-5} w={c.Weight:F2}  {c.Detail}");
 
         // Remembered per market and attached when the fill shows up as a
         // position, so the journal can grade the trade against its setup.
-        _entryContext[market] = (EntryContext.From(signal, scanned.Aside, _risk.RiskScale(), DateTime.UtcNow), DateTime.UtcNow);
+        var riskScale = _risk.RiskScale(convictionScale: scanned.ConvictionScale);
+        _entryContext[market] = (
+            EntryContext.From(signal, scanned.Aside, riskScale, DateTime.UtcNow, scanned.ConvictionScale),
+            DateTime.UtcNow);
 
         if (!_live)
         {

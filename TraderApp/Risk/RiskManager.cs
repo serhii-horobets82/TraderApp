@@ -35,10 +35,28 @@ public sealed class RiskManager
     public bool ProfitLocked => _profitLockedDay is { } d && d == DateOnly.FromDateTime(DateTime.UtcNow);
 
     /// <summary>
-    /// Combined multiplier applied to RiskPerTradePct and the notional caps:
-    /// profit lock (after the day's cap) times the weekend scale.
+    /// Maps a confluence score onto [ConvictionRiskFloor, 1]. Score at or
+    /// below minScore gets the floor; score 1.0 gets full risk. Returns 1
+    /// when the floor is disabled (>= 1) so sizing is unchanged.
     /// </summary>
-    public decimal RiskScale(DateTime? utcNow = null)
+    public static decimal ConvictionScale(double score, double minScore, decimal floor)
+    {
+        if (floor >= 1m) return 1m;
+        if (floor <= 0m) floor = 0m;
+        if (score <= minScore) return floor;
+        if (score >= 1.0) return 1m;
+        var span = 1.0 - minScore;
+        if (span <= 1e-9) return 1m;
+        var t = (score - minScore) / span;
+        return floor + (1m - floor) * (decimal)t;
+    }
+
+    /// <summary>
+    /// Combined multiplier applied to RiskPerTradePct and the notional caps:
+    /// profit lock (after the day's cap) times the weekend scale times an
+    /// optional conviction scale from the signal score.
+    /// </summary>
+    public decimal RiskScale(DateTime? utcNow = null, decimal convictionScale = 1m)
     {
         var now = utcNow ?? DateTime.UtcNow;
         var scale = 1m;
@@ -47,6 +65,8 @@ public sealed class RiskManager
         if (_cfg.WeekendRiskScale > 0 && _cfg.WeekendRiskScale < 1 &&
             now.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
             scale *= _cfg.WeekendRiskScale;
+        if (convictionScale > 0 && convictionScale < 1m)
+            scale *= convictionScale;
         return scale;
     }
 
@@ -429,13 +449,18 @@ public sealed class RiskManager
     /// so that being stopped out costs exactly RiskPerTradePct of equity.
     /// Then clamped by the notional ceilings and the market's own minimums.
     /// </summary>
+    /// <param name="convictionScale">
+    /// Extra scale from signal confidence in [ConvictionRiskFloor, 1]. Pass 1
+    /// to size at full risk (subject to profit-lock / weekend scales).
+    /// </param>
     public SizingResult Size(
         bool isLong,
         decimal entryPrice,
         decimal atr,
         decimal equity,
         decimal openNotional,
-        MarketRules rules)
+        MarketRules rules,
+        decimal convictionScale = 1m)
     {
         if (entryPrice <= 0 || atr <= 0 || equity <= 0)
             return new SizingResult(false, 0, 0, 0, 0, "invalid inputs for sizing");
@@ -463,9 +488,9 @@ public sealed class RiskManager
             return new SizingResult(false, 0, 0, 0, 0,
                 $"stop {stopPct:F3}% is inside the fee band (need {minStop:F3}%) - a winner still dies on the round trip");
 
-        // Profit lock / weekend scale shrink both the risk and the caps, so
-        // the reduced size is real and not clipped back up by a notional cap.
-        var scale = RiskScale();
+        // Profit lock / weekend / conviction shrink both the risk and the caps,
+        // so the reduced size is real and not clipped back up by a notional cap.
+        var scale = RiskScale(convictionScale: convictionScale);
         var riskAmount = equity * (_cfg.RiskPerTradePct / 100m) * scale;
         var amount = riskAmount / stopDistance;
 

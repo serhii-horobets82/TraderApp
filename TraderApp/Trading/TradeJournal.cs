@@ -9,7 +9,8 @@ namespace TraderApp.Trading;
 /// <summary>
 /// What the bot knew when it pressed the button. Captured at order time and
 /// carried to the close so a trade can be graded against its own setup,
-/// not just its PnL.
+/// not just its PnL. Extra weight / ADX fields are the calibration triple
+/// inputs: predicted confidence vs realised outcome.
 /// </summary>
 public sealed record EntryContext(
     double Score,
@@ -21,9 +22,16 @@ public sealed record EntryContext(
     string AnchorRegime,
     int HourUtc,
     string DayOfWeek,
-    decimal RiskScale)
+    decimal RiskScale,
+    double AgreeingWeight = 0,
+    double OpposingWeight = 0,
+    double TriggerWeight = 0,
+    double Adx = 0,
+    decimal ConvictionScale = 1m)
 {
-    public static EntryContext From(TradeSignal s, StandAsideSnapshot? aside, decimal riskScale, DateTime nowUtc) => new(
+    public static EntryContext From(
+        TradeSignal s, StandAsideSnapshot? aside, decimal riskScale, DateTime nowUtc,
+        decimal convictionScale = 1m) => new(
         Math.Round(s.Score, 3),
         s.Components.Where(c => c.Direction == s.Direction && c.Weight > 0).Select(c => c.Name).ToArray(),
         Math.Round(s.AtrPct, 4),
@@ -33,7 +41,12 @@ public sealed record EntryContext(
         aside?.AnchorLabel ?? "",
         nowUtc.Hour,
         nowUtc.DayOfWeek.ToString(),
-        riskScale);
+        riskScale,
+        Math.Round(s.AgreeingWeight, 3),
+        Math.Round(s.OpposingWeight, 3),
+        Math.Round(s.TriggerWeight, 3),
+        Math.Round(s.Adx, 2),
+        Math.Round(convictionScale, 3));
 }
 
 /// <summary>One closed trade, one JSON line. Field names are stable: analysis scripts depend on them.</summary>

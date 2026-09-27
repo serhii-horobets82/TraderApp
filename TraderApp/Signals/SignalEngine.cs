@@ -26,6 +26,21 @@ public sealed record TradeSignal
     public string Regime { get; init; } = "";
     public Direction RegimeDirection { get; init; }
 
+    /// <summary>Absolute weight behind the chosen side (out of ~1.00 available).</summary>
+    public double AgreeingWeight { get; init; }
+
+    /// <summary>Absolute weight fighting the chosen side.</summary>
+    public double OpposingWeight { get; init; }
+
+    /// <summary>|Agreeing − Opposing|. Thin margins are uncertain setups.</summary>
+    public double DirectionEdge => Math.Abs(AgreeingWeight - OpposingWeight);
+
+    /// <summary>Weight from event triggers only (rsi/bb/volume/book/macd/stoch/structure).</summary>
+    public double TriggerWeight { get; init; }
+
+    /// <summary>ADX on the closed entry bar — regime strength, not a vote.</summary>
+    public double Adx { get; init; }
+
     public bool IsActionable => Direction != Direction.None && Vetoes.Count == 0;
 
     /// <summary>
@@ -324,9 +339,18 @@ public sealed class SignalEngine
             // conviction: also require an absolute amount of weight behind the
             // direction, measured against the full 1.00 of available weight.
             var agreeingWeight = chosen == Direction.Long ? longScore : shortScore;
+            var opposingWeight = chosen == Direction.Long ? shortScore : longScore;
             if (agreeingWeight < _cfg.MinAgreeingWeight)
                 vetoes.Add($"thin conviction - only {agreeingWeight:F2} of weight agrees " +
                            $"(need {_cfg.MinAgreeingWeight:F2}); {score:F2} score is just consensus among abstainers");
+
+            // Abstain when both sides have real weight. Score alone can clear
+            // MinScore with a 0.55 vs 0.40 fight; DirectionEdge catches that.
+            var directionEdge = Math.Abs(agreeingWeight - opposingWeight);
+            if (_cfg.MinDirectionEdge > 0 && directionEdge < _cfg.MinDirectionEdge)
+                vetoes.Add($"uncertain edge {directionEdge:F2} < {_cfg.MinDirectionEdge:F2} " +
+                           $"(agree {agreeingWeight:F2} vs oppose {opposingWeight:F2}) — abstain");
+
             if (confirmations < _cfg.MinConfirmations)
                 vetoes.Add($"only {confirmations} confirmations, need {_cfg.MinConfirmations}");
 
@@ -376,6 +400,12 @@ public sealed class SignalEngine
             vetoes.Add("no directional edge");
         }
 
+        var finalAgree = chosen == Direction.Long ? longScore : chosen == Direction.Short ? shortScore : 0;
+        var finalOppose = chosen == Direction.Long ? shortScore : chosen == Direction.Short ? longScore : 0;
+        var finalTrigger = chosen == Direction.None
+            ? 0
+            : components.Where(c => c.IsTrigger && c.Direction == chosen).Sum(c => c.Weight);
+
         return new TradeSignal
         {
             Market = market,
@@ -388,7 +418,11 @@ public sealed class SignalEngine
             Components = components,
             Vetoes = vetoes,
             Regime = regimeLabel,
-            RegimeDirection = regime
+            RegimeDirection = regime,
+            AgreeingWeight = finalAgree,
+            OpposingWeight = finalOppose,
+            TriggerWeight = finalTrigger,
+            Adx = adxNow
         };
     }
 

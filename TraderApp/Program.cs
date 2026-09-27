@@ -275,7 +275,10 @@ internal static class Program
         Console.WriteLine($"  Markets       : {string.Join(", ", c.Trading.Markets)}");
         Console.WriteLine($"  Timeframes    : {c.Trading.EntryInterval} entry / {c.Trading.RegimeInterval} regime");
         Console.WriteLine($"  Leverage      : {c.Trading.Leverage}x");
-        Console.WriteLine($"  Risk/trade    : {c.Risk.RiskPerTradePct}% of equity");
+        Console.WriteLine($"  Risk/trade    : {c.Risk.RiskPerTradePct}% of equity" +
+                          (c.Risk.ConvictionRiskFloor < 1
+                              ? $" (conviction floor x{c.Risk.ConvictionRiskFloor:0.##})"
+                              : ""));
         Console.WriteLine($"  Stop / target : {c.Trading.StopLossAtrMult}x ATR / {c.Trading.TakeProfitAtrMult}x ATR");
         Console.WriteLine($"  Hard stop     : {c.Trading.HardStopMultiplier}x bot stop, attached to the entry order");
         Console.WriteLine($"  Max positions : {c.Risk.MaxConcurrentPositions} (max {c.Risk.MaxTotalNotionalUsd} notional)");
@@ -288,7 +291,8 @@ internal static class Program
         Console.WriteLine($"  Loss streak   : {c.Risk.MaxConsecutiveLosses} → {(c.Risk.HaltOnConsecutiveLosses ? "HALT" : $"cooldown {c.Risk.LossCooldownMinutes}m")}");
         Console.WriteLine($"  Break-even    : {(c.Trading.BreakEvenEnabled ? "on" : "off")} · trail at {c.Trading.TrailStartAtR}R · scratch {c.Trading.ScratchUnprofitableMinutes}m");
         Console.WriteLine($"  Session state : {(c.Risk.PersistSessionState ? c.Risk.SessionStatePath : "off")}");
-        Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
+        Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations" +
+                          (c.Signals.MinDirectionEdge > 0 ? $" · edge ≥ {c.Signals.MinDirectionEdge:F2}" : ""));
         Console.WriteLine($"  Loop          : every {c.Trading.LoopIntervalMs}ms, status every {c.Trading.StatusLogEveryTicks} ticks");
         Console.WriteLine($"  MACD align    : {(c.Signals.RequireMacdAlign ? "required" : "optional")}");
         Console.WriteLine($"  HTF flat      : {(c.Signals.RequireDecidedHtf ? "blocks entries" : "allows chop setups")}");
