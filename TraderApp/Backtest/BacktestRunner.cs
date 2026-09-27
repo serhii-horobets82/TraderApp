@@ -199,6 +199,7 @@ public static class BacktestRunner
             VolumeMaPeriod = c.Signals.VolumeMaPeriod,
             MinScore = c.Signals.MinScore, MinConfirmations = c.Signals.MinConfirmations,
             MinTriggerWeight = c.Signals.MinTriggerWeight, MinAgreeingWeight = c.Signals.MinAgreeingWeight,
+            MinDirectionEdge = c.Signals.MinDirectionEdge,
             MinVolumeRatio = c.Signals.MinVolumeRatio,
             MaxTrendRsiLong = c.Signals.MaxTrendRsiLong, MinTrendRsiShort = c.Signals.MinTrendRsiShort,
             RequireMacdAlign = c.Signals.RequireMacdAlign,

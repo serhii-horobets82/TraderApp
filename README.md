@@ -59,10 +59,11 @@ withdrawal — and IP-allowlist it in the WhiteBIT UI.
 Nine components vote independently; a trade needs a weighted score above
 `Signals.MinScore` **and** at least `MinConfirmations` components agreeing
 **and** a fresh trigger (RSI / Bollinger / volume / book / MACD / stochastic /
-structure totaling `MinTriggerWeight`) **and** no veto. Regime, EMA and VWAP
-are background state — they can stay aligned for hours and must not open a
-trade on their own. Neutral votes are ignored in the score so they cannot
-dilute a real setup.
+structure totaling `MinTriggerWeight`) **and** a clear direction edge
+(`MinDirectionEdge` — |agreeing − opposing| weight) **and** no veto. Regime,
+EMA and VWAP are background state — they can stay aligned for hours and must
+not open a trade on their own. Neutral votes are ignored in the score so they
+cannot dilute a real setup.
 
 | Component | Weight | What it reads |
 |---|---|---|
@@ -104,7 +105,9 @@ smaller size, and early cutouts — not for maximum activity.
 **Sizing is derived from the stop, not chosen.** Quantity is set so that being
 stopped out costs exactly `RiskPerTradePct` (0.25%) of collateral equity, then
 clamped by the per-position and total notional ceilings and the market's own
-`minAmount` / `minTotal` / `stepSize`.
+`minAmount` / `minTotal` / `stepSize`. When `ConvictionRiskFloor` is below 1
+(default 0.75), size also scales with the signal score: a setup that only just
+clears `MinScore` risks the floor fraction, a clean 1.00 keeps full risk.
 
 **Two stops, on purpose:**
 
@@ -214,6 +217,8 @@ The settings worth knowing:
 | `Trading.LoopIntervalMs` | `2000` | Decision loop period |
 | `Trading.StatusLogEveryTicks` | `20` | Equity status cadence (~40s). Blocked setups log once per new 15m bar |
 | `Signals.MinScore` | `0.58` | Raise for fewer, higher-conviction trades |
+| `Signals.MinDirectionEdge` | `0.18` | Abstain when \|agree − oppose\| weight is thinner than this (0 = off) |
+| `Risk.ConvictionRiskFloor` | `0.75` | Scale size with score; 1 = always full `RiskPerTradePct` |
 | `Signals.RequireMacdAlign` | `false` | When true, MACD histogram must agree with direction |
 | `Signals.StandAsideEnabled` | `true` | Veto crowded funding or a BTC 1h flip against the alt |
 | `Signals.MaxFundingRate` | `0.0002` | Predicted perp funding (0.02%) that refuses the crowded side |

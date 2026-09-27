@@ -43,6 +43,10 @@ public sealed class BotConfig
             errors.Add("Risk.MaxConsecutiveLosses must be between 1 and 20.");
         if (Signals.MinScore is < 0.3 or > 1.0)
             errors.Add("Signals.MinScore must be in [0.3, 1.0].");
+        if (Signals.MinDirectionEdge is < 0 or > 1.0)
+            errors.Add("Signals.MinDirectionEdge must be in [0, 1.0]. 0 disables the uncertainty gate.");
+        if (Risk.ConvictionRiskFloor is < 0 or > 1)
+            errors.Add("Risk.ConvictionRiskFloor must be in [0, 1]. 1 disables conviction sizing.");
         if (Trading.TakeProfitAtrMult <= Trading.StopLossAtrMult * 0.8m)
             errors.Add("Trading.TakeProfitAtrMult should be at least 0.8x StopLossAtrMult, otherwise the win rate required to break even is unrealistic.");
         if (Trading.PartialTakeAtR < 0 || (Trading.PartialTakeAtR > 0 && Trading.PartialTakeFraction is <= 0 or >= 1))
@@ -268,6 +272,15 @@ public sealed class SignalConfig
     /// (regime, rsi) abstain.
     /// </summary>
     public double MinAgreeingWeight { get; set; } = 0.42;
+
+    /// <summary>
+    /// Minimum |agreeing − opposing| weight. Abstains when both sides have
+    /// real support even if the agreement score clears MinScore — the
+    /// confidence-gating idea from calibrated decision engines, applied to
+    /// the confluence battery. 0 disables.
+    /// </summary>
+    public double MinDirectionEdge { get; set; } = 0.18;
+
     /// <summary>Refuse an entry when the last closed bar's volume is this far below its average.</summary>
     public double MinVolumeRatio { get; set; } = 0.40;
 
@@ -403,6 +416,15 @@ public sealed class RiskConfig
     /// Weekend crypto volume is thinner and moves are more often fee-only.
     /// </summary>
     public decimal WeekendRiskScale { get; set; } = 1m;
+
+    /// <summary>
+    /// Floor for conviction-scaled sizing. 1 = always full RiskPerTradePct
+    /// (disabled). Below 1, size scales linearly from this floor at MinScore
+    /// up to 1.0 at score=1. Mirror of "gate size on calibrated confidence":
+    /// weak setups risk less, strong ones keep the full budget. Never raises
+    /// size above RiskPerTradePct.
+    /// </summary>
+    public decimal ConvictionRiskFloor { get; set; } = 1m;
 
     /// <summary>Stop opening new positions after this many losses in a row.</summary>
     public int MaxConsecutiveLosses { get; set; } = 10;
