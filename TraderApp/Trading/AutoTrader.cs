@@ -68,10 +68,11 @@ internal sealed record ClosedTrade(
 public sealed class AutoTrader : IAsyncDisposable
 {
     private readonly BotConfig _cfg;
-    private readonly WhiteBitClient _client;
+    private readonly IExchangeClient _client;
     private readonly SignalEngine _signals;
     private readonly StandAsideReader _standAside;
     private readonly RiskManager _risk;
+    private readonly string _venueLabel;
 
     private readonly Dictionary<long, ManagedPosition> _managed = new();
     private readonly List<PendingEntry> _pending = new();
@@ -101,10 +102,11 @@ public sealed class AutoTrader : IAsyncDisposable
     private DateTime _lastFlatEquityWarnUtc = DateTime.MinValue;
     private DateTime _lastIdleStatusUtc = DateTime.MinValue;
 
-    public AutoTrader(BotConfig cfg, WhiteBitClient client, Notifications.TelegramNotifier? telegram = null)
+    public AutoTrader(BotConfig cfg, IExchangeClient client, Notifications.TelegramNotifier? telegram = null)
     {
         _cfg = cfg;
         _client = client;
+        _venueLabel = client.ExchangeId;
         _telegram = telegram;
         _signals = new SignalEngine(cfg.Signals);
         _standAside = new StandAsideReader(cfg, client);
@@ -200,7 +202,7 @@ public sealed class AutoTrader : IAsyncDisposable
 
             try
             {
-                var summary = await _client.GetCollateralSummaryAsync(ct);
+                var summary = await _client.GetAccountSummaryAsync(ct);
                 var equity = summary?.Equity ?? 0m;
                 MaybeSendDailyDigest(equity);
                 if (_risk.TickUtcDay(equity))
@@ -232,27 +234,27 @@ public sealed class AutoTrader : IAsyncDisposable
         {
             if (!_rules.TryGetValue(market, out var r))
             {
-                Log.Warn($"{market}: not present in /api/v4/public/markets - it will be skipped");
+                Log.Warn($"{_venueLabel} {market}: not listed by the exchange - it will be skipped");
                 continue;
             }
-            Log.Info($"  {r}");
+            Log.Info($"  [{_venueLabel}] {r}");
             if (!r.IsCollateral)
-                Log.Warn($"{market}: isCollateral=false - collateral orders on it will be rejected");
+                Log.Warn($"{_venueLabel} {market}: isCollateral=false - orders on it will be rejected");
             if (string.IsNullOrWhiteSpace(r.TickSize.ToString()) || r.TickSize <= 0)
-                Log.Warn($"{market}: no tickSize from the exchange, falling back to moneyPrec");
+                Log.Warn($"{_venueLabel} {market}: no tickSize from the exchange, falling back to moneyPrec");
         }
 
         CollateralSummary? summary;
         try
         {
-            summary = await _client.GetCollateralSummaryAsync(ct);
+            summary = await _client.GetAccountSummaryAsync(ct);
         }
         catch (ApiException ex) when (ex.Status is System.Net.HttpStatusCode.Unauthorized
                                           or System.Net.HttpStatusCode.Forbidden)
         {
             throw new InvalidOperationException(
-                "WhiteBIT rejected the credentials. Check that the key and secret are correct, that the key has " +
-                "trade permission for collateral markets, and that your current IP is on the key's allowlist. " +
+                $"{_venueLabel} rejected the credentials. Check that the key and secret are correct, that the key has " +
+                "trade permission, and that your current IP is on the key's allowlist. " +
                 "Run with --signals-only to use the bot without credentials.", ex);
         }
 
@@ -261,25 +263,31 @@ public sealed class AutoTrader : IAsyncDisposable
 
         var equity = summary?.Equity ?? 0m;
         _risk.RestoreOrInitialise(equity);
-        Log.Info($"collateral equity {equity:F2} | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
+        Log.Info($"[{_venueLabel}] equity {equity:F2} | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
 
         if (_risk.Halted)
         {
-            Log.Risk($"boot with active halt — will park after adopting open positions: {_risk.HaltReason}");
+            Log.Risk($"[{_venueLabel}] boot with active halt — will park after adopting open positions: {_risk.HaltReason}");
         }
 
         if (equity <= 0)
-            Log.Warn("collateral equity is zero - fund the collateral account before enabling live trading");
+            Log.Warn($"[{_venueLabel}] equity is zero - fund the account before enabling live trading");
 
-        if (_live && summary is not null && summary.Leverage != _cfg.Trading.Leverage)
+        if (_live && summary is not null && summary.Leverage != 0 && summary.Leverage != _cfg.Trading.Leverage)
         {
-            Log.Info($"setting account leverage {summary.Leverage}x -> {_cfg.Trading.Leverage}x");
+            Log.Info($"[{_venueLabel}] setting account leverage {summary.Leverage}x -> {_cfg.Trading.Leverage}x");
             try { await _client.SetLeverageAsync(_cfg.Trading.Leverage, ct); }
-            catch (ApiException ex) { Log.Warn($"could not set leverage: {ex.Message}"); }
+            catch (ApiException ex) { Log.Warn($"[{_venueLabel}] could not set leverage: {ex.Message}"); }
+        }
+        else if (_live && summary is not null && summary.Leverage == 0)
+        {
+            // Bybit reports leverage per position, not on the wallet summary.
+            try { await _client.SetLeverageAsync(_cfg.Trading.Leverage, ct); }
+            catch (ApiException ex) { Log.Warn($"[{_venueLabel}] could not set leverage: {ex.Message}"); }
         }
 
         _telegram?.Send(
-            $"{(_live ? "🟢" : "⚪")} Started · {(_live ? "LIVE" : "DRY RUN")}" +
+            $"{(_live ? "🟢" : "⚪")} Started · {_venueLabel} · {(_live ? "LIVE" : "DRY RUN")}" +
             $"{(_risk.Halted ? " · 🛑 HALTED" : "")}\n" +
             $"{BuildInfo.Display}\n" +
             $"Balance {equity:F2} USDT · {_cfg.Trading.Markets.Count} markets");
@@ -287,7 +295,7 @@ public sealed class AutoTrader : IAsyncDisposable
         // Adopt anything already open so it gets managed rather than ignored.
         var positions = await _client.GetOpenPositionsAsync(null, ct);
         foreach (var p in positions.Where(p => p.Market is not null))
-            Log.Warn($"pre-existing position {p.Market} #{p.PositionId} size {p.Amount} @ {p.BasePrice} - will be adopted and managed");
+            Log.Warn($"[{_venueLabel}] pre-existing position {p.Market} #{p.PositionId} size {p.Amount} @ {p.BasePrice} - will be adopted and managed");
     }
 
     /// <summary>
@@ -405,7 +413,7 @@ public sealed class AutoTrader : IAsyncDisposable
         if (DateTime.UtcNow - _rulesRefreshedUtc > TimeSpan.FromHours(6))
             await RefreshMarketRulesAsync(ct);
 
-        var summary = await _client.GetCollateralSummaryAsync(ct);
+        var summary = await _client.GetAccountSummaryAsync(ct);
         var positions = await _client.GetOpenPositionsAsync(null, ct);
         var equity = summary?.Equity ?? 0m;
 
@@ -637,7 +645,7 @@ public sealed class AutoTrader : IAsyncDisposable
         var session = _risk.SessionStartEquity > 0 ? _lastEquity - _risk.SessionStartEquity : 0m;
 
         var sb = new System.Text.StringBuilder();
-        sb.Append($"{(_live ? "🟢" : "⚪")} {(_live ? "LIVE" : "DRY RUN")} · {BuildInfo.Display}\n");
+        sb.Append($"{(_live ? "🟢" : "⚪")} {_venueLabel} · {(_live ? "LIVE" : "DRY RUN")} · {BuildInfo.Display}\n");
         sb.Append($"Balance  {_lastEquity:F2} USDT ({session:+0.00;-0.00} session)\n");
         sb.Append($"Open     {real.Count}/{_cfg.Risk.MaxConcurrentPositions} · notional {notional:F2}\n");
         sb.Append($"Pending  {_pending.Count} · last tick {age}\n");
@@ -655,9 +663,10 @@ public sealed class AutoTrader : IAsyncDisposable
     public string DescribePositions()
     {
         var real = _lastPositions.Where(p => p.AbsAmount > 0 && p.BasePrice > 0).ToList();
-        if (real.Count == 0) return "No open positions.";
+        if (real.Count == 0) return $"[{_venueLabel}] No open positions.";
 
         var sb = new System.Text.StringBuilder();
+        sb.Append($"[{_venueLabel}]\n");
         foreach (var p in real)
         {
             sb.Append($"{Short(p.Market)} {(p.IsLong ? "long" : "short")} {p.AbsAmount} @ {p.BasePrice}\n");
@@ -669,13 +678,15 @@ public sealed class AutoTrader : IAsyncDisposable
     }
 
     private static string Short(string? market) =>
-        market is null ? "?" : market.Replace("_USDT", "", StringComparison.OrdinalIgnoreCase);
+        market is null ? "?"
+            : market.Replace("_USDT", "", StringComparison.OrdinalIgnoreCase)
+                    .Replace("USDT", "", StringComparison.OrdinalIgnoreCase);
 
     // ── Entries ─────────────────────────────────────────────────────────
 
     private sealed record ScannedEntry(
         TradeSignal Signal, OrderBook Book, MarketRules Rules, decimal EntryPrice, SizingResult Sizing,
-        StandAsideSnapshot? Aside);
+        StandAsideSnapshot? Aside, decimal ConvictionScale);
 
     private async Task ConsiderEntriesAsync(
         decimal equity, decimal openNotional, IReadOnlyList<Position> positions, CancellationToken ct)
@@ -837,7 +848,9 @@ public sealed class AutoTrader : IAsyncDisposable
             entryPrice = isLong ? rules.CeilPrice(reference) : rules.FloorPrice(reference);
         }
 
-        var sizing = _risk.Size(isLong, entryPrice, signal.Atr, equity, openNotional, rules);
+        var conviction = RiskManager.ConvictionScale(
+            signal.Score, _cfg.Signals.MinScore, _cfg.Risk.ConvictionRiskFloor);
+        var sizing = _risk.Size(isLong, entryPrice, signal.Atr, equity, openNotional, rules, conviction);
         if (!sizing.Allowed)
         {
             if (ShouldLogSizingReject(market))
@@ -845,7 +858,7 @@ public sealed class AutoTrader : IAsyncDisposable
             return null;
         }
 
-        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside);
+        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside, conviction);
     }
 
     private bool ShouldLogSizingReject(string market)
@@ -872,14 +885,17 @@ public sealed class AutoTrader : IAsyncDisposable
             $"stop {rules.FormatPriceRaw(sizing.StopPrice)} " +
             $"tp {rules.FormatPriceRaw(sizing.TakeProfitPrice)} " +
             $"hardStop {rules.FormatPriceRaw(sizing.HardStopPrice)} | " +
-            $"risk {riskQuote:F2} | {signal.Explain()}");
+            $"risk {riskQuote:F2} | conv x{scanned.ConvictionScale:0.##} | {signal.Explain()}");
 
         foreach (var c in signal.Components.Where(c => c.Weight > 0))
             Log.Info($"    {c.Name,-10} {c.Direction,-5} w={c.Weight:F2}  {c.Detail}");
 
         // Remembered per market and attached when the fill shows up as a
         // position, so the journal can grade the trade against its setup.
-        _entryContext[market] = (EntryContext.From(signal, scanned.Aside, _risk.RiskScale(), DateTime.UtcNow), DateTime.UtcNow);
+        var riskScale = _risk.RiskScale(convictionScale: scanned.ConvictionScale);
+        _entryContext[market] = (
+            EntryContext.From(signal, scanned.Aside, riskScale, DateTime.UtcNow, scanned.ConvictionScale),
+            DateTime.UtcNow);
 
         if (!_live)
         {
@@ -887,7 +903,7 @@ public sealed class AutoTrader : IAsyncDisposable
             return;
         }
 
-        var payload = new CollateralLimitOrderPayload
+        var payload = new EntryLimitRequest
         {
             Market = market,
             Side = isLong ? "buy" : "sell",
@@ -896,13 +912,12 @@ public sealed class AutoTrader : IAsyncDisposable
             PostOnly = _cfg.Trading.PostOnlyEntries,
             ClientOrderId = $"ta-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
             StopLoss = rules.FormatPriceRaw(sizing.HardStopPrice),
-            TakeProfit = rules.FormatPriceRaw(sizing.TakeProfitPrice),
-            Stp = "co"
+            TakeProfit = rules.FormatPriceRaw(sizing.TakeProfitPrice)
         };
 
         try
         {
-            var order = await _client.PlaceCollateralLimitAsync(payload, ct);
+            var order = await _client.PlaceEntryLimitAsync(payload, ct);
             if (order is null) return;
 
             _pending.Add(new PendingEntry(order.OrderId, market, isLong, DateTime.UtcNow));
@@ -993,7 +1008,11 @@ public sealed class AutoTrader : IAsyncDisposable
 
         foreach (var t in _awaitingPnl.ToList())
         {
-            var rec = closed.FirstOrDefault(c => c.PositionId == t.PositionId);
+            var rec = closed.FirstOrDefault(c => c.PositionId == t.PositionId)
+                      ?? closed.FirstOrDefault(c =>
+                          string.Equals(c.Market, t.Market, StringComparison.OrdinalIgnoreCase) &&
+                          (t.ClosedUtc - DateTimeOffset.FromUnixTimeSeconds(c.CloseDate).UtcDateTime).Duration()
+                              < TimeSpan.FromMinutes(15));
 
             if (rec is null)
             {
@@ -1192,15 +1211,13 @@ public sealed class AutoTrader : IAsyncDisposable
 
         try
         {
-            var order = await _client.PlaceCollateralMarketAsync(new CollateralMarketOrderPayload
+            var order = await _client.PlaceReduceOnlyMarketAsync(new ReduceOnlyMarketRequest
             {
                 Market = pos.Market!,
                 Side = m.IsLong ? "sell" : "buy",
                 Amount = rules.FormatAmount(closeAmount),
-                ReduceOnly = true,
                 PositionSide = pos.PositionSide,
-                ClientOrderId = $"tp-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
-                Stp = "co"
+                ClientOrderId = $"tp-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}"
             }, ct);
 
             m.PartialTaken = true;

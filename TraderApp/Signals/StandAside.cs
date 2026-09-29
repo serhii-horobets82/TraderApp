@@ -84,8 +84,12 @@ public static class StandAsideRules
     public static string? PerpTicker(string spotMarket)
     {
         var usdt = spotMarket.IndexOf("_USDT", StringComparison.OrdinalIgnoreCase);
-        if (usdt <= 0) return null;
-        return spotMarket[..usdt] + "_PERP";
+        if (usdt > 0) return spotMarket[..usdt] + "_PERP";
+        // Bybit linear: funding lives on the same symbol (SOLUSDT).
+        if (spotMarket.EndsWith("USDT", StringComparison.OrdinalIgnoreCase) &&
+            !spotMarket.Contains('_', StringComparison.Ordinal))
+            return spotMarket;
+        return null;
     }
 }
 
@@ -93,9 +97,9 @@ public static class StandAsideRules
 public sealed class StandAsideReader
 {
     private readonly BotConfig _cfg;
-    private readonly WhiteBitClient _client;
+    private readonly IExchangeClient _client;
 
-    public StandAsideReader(BotConfig cfg, WhiteBitClient client)
+    public StandAsideReader(BotConfig cfg, IExchangeClient client)
     {
         _cfg = cfg;
         _client = client;
