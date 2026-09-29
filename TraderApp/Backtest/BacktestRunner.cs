@@ -188,6 +188,7 @@ public static class BacktestRunner
             MaxPositionMinutes = c.Trading.MaxPositionMinutes,
             ScratchUnprofitableMinutes = c.Trading.ScratchUnprofitableMinutes,
             ScratchMaxFavourableR = c.Trading.ScratchMaxFavourableR,
+            ScratchOnlyAboveR = c.Trading.ScratchOnlyAboveR,
             PostOnlyEntries = c.Trading.PostOnlyEntries,
             EntryOrderTimeoutSeconds = c.Trading.EntryOrderTimeoutSeconds
         },
@@ -204,6 +205,8 @@ public static class BacktestRunner
             RequireMacdAlign = c.Signals.RequireMacdAlign,
             RequireDecidedHtf = c.Signals.RequireDecidedHtf,
             BookVetoMinImbalance = c.Signals.BookVetoMinImbalance,
+            PullbackTriggerEnabled = c.Signals.PullbackTriggerEnabled,
+            PullbackMinVolumeRatio = c.Signals.PullbackMinVolumeRatio,
             StandAsideEnabled = false,
             AdxTrendThreshold = c.Signals.AdxTrendThreshold,
             RsiOversold = c.Signals.RsiOversold, RsiOverbought = c.Signals.RsiOverbought,

@@ -139,8 +139,9 @@ nothing.
 | Peak drawdown | −2% from session peak | Flatten + halt (protects winners from give-back) |
 | Daily profit lock | +3% session | Continue at `ProfitLockRiskScale` (×0.5) until UTC midnight; `0` halts instead |
 | Consecutive losses | 10 | Hard halt (`HaltOnConsecutiveLosses`) |
-| Max concurrent | 1 | One position at a time |
-| Same-direction cap | 1 | No stacked longs/shorts across alts |
+| Max concurrent | 2 | A long and a short may coexist |
+| Same-direction cap | 1 | No stacked longs/shorts across alts — they move together, so two longs is one bet with double fees |
+| Total notional | 160 | Must be ≥ slots × per-position cap, or the last slot trades crumbs (a 10 USDT SUI position paid full fees for a third of the intended risk) |
 | Per-market cooldown | 300s | No re-entry churn |
 | Trade budget | 6/hour, 16/day UTC | Caps overtrading |
 | Margin call | on | Flatten + halt |
@@ -176,8 +177,15 @@ the state file. Mount a volume on `/app/data` if you want the file to survive
 image rebuilds.
 
 `BreakEvenEnabled` (default off in live config) is honoured by both live and
-backtest exits — they share `ExitRules`. Trail starts at `TrailStartAtR` (1.5R)
-and dead trades scratch after `ScratchUnprofitableMinutes` (45).
+backtest exits — they share `ExitRules`. Trail starts at `TrailStartAtR` (1.5R).
+
+**Scratch rule.** A trade that never worked (best excursion below
+`ScratchMaxFavourableR`) is closed after `ScratchUnprofitableMinutes` (150) —
+but only while it is still near flat (`ScratchOnlyAboveR`, −0.35R). Signal
+quality shows the entry's edge arrives at a ~16-bar horizon, so the old 45-minute
+scratch was closing trades at 3 bars; and scratching at −0.74R saved 0.26R while
+forfeiting the whole recovery. On the Aug–Sep 2026 replay the change is worth
+about +10 USDT per 45 days and +3 points of win rate.
 
 ---
 
@@ -208,11 +216,15 @@ The settings worth knowing:
 | `Trading.MaxPositionMinutes` | `300` | Time stop; must give a 3×ATR target room on 15m bars |
 | `Trading.TradeJournalPath` | `data/trades.jsonl` | One JSON line per closed trade with its entry context |
 | `Signals.MinBookDepthUsd` | `1000` | Thin-side depth over the top 10 levels below this is a veto |
-| `Risk.MaxConcurrentPositions` | `1` | One position at a time |
+| `Risk.MaxConcurrentPositions` | `2` | With `MaxSameDirectionPositions: 1` — one long plus one short at most |
+| `Risk.MaxTotalNotionalUsd` | `160` | Slots × per-position cap; smaller and the last slot is undersized |
+| `Trading.ScratchUnprofitableMinutes` / `ScratchOnlyAboveR` | `150` / `-0.35` | Scratch a dead trade after 150m, only if still above −0.35R |
+| `Trading.IdleStatusLogMinutes` | `5` | Equity status line cadence while nothing is open |
+| `Signals.PullbackTriggerEnabled` | `false` | Trend-pullback trigger (tag of EMA21, close back on the trend side, RSI in band, volume ≥ `PullbackMinVolumeRatio`). Measured break-even at best — see below |
 | `Risk.MaxTradesPerHour` / `MaxTradesPerDay` | `6` / `16` | Overtrading budget |
 | `Risk.HaltOnConsecutiveLosses` | `true` | 10 losses → session halt (else cooldown) |
 | `Trading.LoopIntervalMs` | `2000` | Decision loop period |
-| `Trading.StatusLogEveryTicks` | `20` | Equity status cadence (~40s). Blocked setups log once per new 15m bar |
+| `Trading.StatusLogEveryTicks` | `20` | Position status cadence (~40s); the equity line is throttled to `IdleStatusLogMinutes` when flat. Blocked setups log once per new 15m bar |
 | `Signals.MinScore` | `0.58` | Raise for fewer, higher-conviction trades |
 | `Signals.RequireMacdAlign` | `false` | When true, MACD histogram must agree with direction |
 | `Signals.StandAsideEnabled` | `true` | Veto crowded funding or a BTC 1h flip against the alt |
@@ -245,7 +257,7 @@ On 5m several majors still fail or barely clear the 0.30% fee+edge floor; on 15m
 
 **Live market set.** The bot scans `SOL_USDT`, `AAVE_USDT`, `XRP_USDT`, and
 `SUI_USDT` — the liquid names that clear fees with room to spare. `MaxConcurrentPositions`
-is still 1 and `MaxSameDirectionPositions` is 1, so extra pairs mainly improve
+is 2 with `MaxSameDirectionPositions` 1, so extra pairs mainly improve
 setup selection, not stacked exposure. BTC/ETH stay out: their 15m ATR is usually
 below `MinAtrPct`. DOT works on volatility but is left off by default as the
 wildest of the measured set.
@@ -493,6 +505,19 @@ Logs are written to `bin/<config>/net10.0/logs/trader-YYYYMMDD.log`.
 
 ## Operational notes
 
+- **Collateral must be quote-only.** The drawdown and profit locks read
+  collateral *equity*. If the collateral account holds BTC/SOL/anything but
+  USDT, their price moves count as PnL: a dip can halt the bot with no trade
+  taken and a rally can trip the profit lock. At boot the bot lists any
+  non-quote collateral (`⚠️ collateral holds non-USDT assets…`) and at runtime
+  warns when equity moves ≥0.25% while nothing is open. If you see either,
+  convert the assets or move them to the main account.
+- **The trend-pullback trigger is off by default, deliberately.** It exists
+  because a strong trend (AAVE at RSI 81–88 for 90 minutes) is otherwise
+  unreachable — "late long" blocks the chase and nothing fires on the pullback.
+  Measured on the Aug–Sep 2026 replay it added ~100 trades per 45 days that were
+  net negative at `PullbackMinVolumeRatio` 1.0 and break-even at 1.3. Enable it
+  only if the journal shows trend days being missed.
 - **Restart safety.** Positions already open are adopted on startup and managed
   with stops derived from current ATR. Ctrl+C cancels resting entry orders but
   deliberately does **not** close positions — they keep their exchange-side

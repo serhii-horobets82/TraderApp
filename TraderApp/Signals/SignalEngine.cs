@@ -9,7 +9,7 @@ public enum Direction { None, Long, Short }
 public sealed record SignalComponent(string Name, Direction Direction, double Weight, string Detail)
 {
     /// <summary>Event-like votes. Regime/EMA/VWAP are background state and can stay true for hours.</summary>
-    public bool IsTrigger => Name is "rsi" or "bollinger" or "volume" or "book" or "macd" or "stoch" or "structure";
+    public bool IsTrigger => Name is "rsi" or "bollinger" or "volume" or "book" or "macd" or "stoch" or "structure" or "pullback";
 }
 
 public sealed record TradeSignal
@@ -288,6 +288,43 @@ public sealed class SignalEngine
             components.Add(new SignalComponent("structure", dir, 0.10, detail));
         }
 
+        // 10. Trend pullback. The one setup a strong trend offers that the
+        //     rest of the stack cannot see: AAVE ran at RSI 81-88 for 90
+        //     minutes and every scan said "late long, wait for a pullback" -
+        //     then when price dipped to EMA21 and RSI cooled to ~55, nothing
+        //     fired because the RSI trigger needs a cross of 40/50. This
+        //     votes when a bar tags the slow EMA (within the last 2 bars) and
+        //     closes back on the trend side with RSI in the healthy band.
+        if (_cfg.PullbackTriggerEnabled && trending && i >= 2 &&
+            Ta.IsUsable(emaSlow[i]) && Ta.IsUsable(emaSlow[i - 1]) && Ta.IsUsable(emaSlow[i - 2]))
+        {
+            Direction dir = Direction.None;
+            string detail = "no pullback";
+            var bar = entryCandles[i];
+            var taggedFromAbove = false;
+            var taggedFromBelow = false;
+            for (int k = i - 2; k <= i; k++)
+            {
+                if ((double)entryCandles[k].Low <= emaSlow[k]) taggedFromAbove = true;
+                if ((double)entryCandles[k].High >= emaSlow[k]) taggedFromBelow = true;
+            }
+            var upTrend = regime == Direction.Long && Ta.IsUsable(emaFast[i]) && emaFast[i] > emaSlow[i];
+            var downTrend = regime == Direction.Short && Ta.IsUsable(emaFast[i]) && emaFast[i] < emaSlow[i];
+
+            // The resumption bar must come on at least average volume; a
+            // reclaim on thin volume is the pullback still in progress.
+            var resumed = volRatio >= (double)_cfg.PullbackMinVolumeRatio;
+
+            if (upTrend && taggedFromAbove && resumed && closes[i] > emaSlow[i] && bar.Close > bar.Open &&
+                rsiNow >= 42 && rsiNow < _cfg.MaxTrendRsiLong)
+            { dir = Direction.Long; detail = $"pullback to EMA{_cfg.EmaSlow} held, RSI {rsiNow:F0}, vol {volRatio:F2}x"; }
+            else if (downTrend && taggedFromBelow && resumed && closes[i] < emaSlow[i] && bar.Close < bar.Open &&
+                     rsiNow <= 58 && rsiNow > _cfg.MinTrendRsiShort)
+            { dir = Direction.Short; detail = $"bounce to EMA{_cfg.EmaSlow} rejected, RSI {rsiNow:F0}, vol {volRatio:F2}x"; }
+
+            components.Add(new SignalComponent("pullback", dir, 0.14, detail));
+        }
+
         // ── Aggregate ───────────────────────────────────────────────────
         // Neutral votes used to sit in the denominator and silently fail a
         // 0.60 setup against a 0.62 threshold (regime+EMA+VWAP). Only sides
@@ -336,7 +373,7 @@ public sealed class SignalEngine
                 .Where(c => c.IsTrigger && c.Direction == chosen)
                 .Sum(c => c.Weight);
             if (triggerWeight < _cfg.MinTriggerWeight)
-                vetoes.Add($"no fresh trigger (rsi/bb/volume/book/macd/stoch/structure weight {triggerWeight:F2} < {_cfg.MinTriggerWeight:F2})");
+                vetoes.Add($"no fresh trigger (rsi/bb/volume/book/macd/stoch/structure/pullback weight {triggerWeight:F2} < {_cfg.MinTriggerWeight:F2})");
 
             if (volRatio > 0 && volRatio < _cfg.MinVolumeRatio)
                 vetoes.Add($"dead bar volume {volRatio:F2}x < {_cfg.MinVolumeRatio:F2}x");

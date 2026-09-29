@@ -132,9 +132,12 @@ public static class ExitRules
             return $"time stop after {cfg.MaxPositionMinutes} minutes";
 
         // Only scratch a trade that never went anywhere - see the ten
-        // consecutive fee-losses this rule used to manufacture.
+        // consecutive fee-losses this rule used to manufacture. And only
+        // while it is still near flat: closing at -0.74R saves 0.26R and
+        // forfeits the recovery, so a deep trade is left to its stop.
         if (cfg.ScratchUnprofitableMinutes > 0 &&
             rMultiple < 0 &&
+            (cfg.ScratchOnlyAboveR <= -1m || rMultiple >= cfg.ScratchOnlyAboveR) &&
             m.MaxFavourableR < cfg.ScratchMaxFavourableR &&
             age > TimeSpan.FromMinutes(cfg.ScratchUnprofitableMinutes))
             return $"never worked - {rMultiple:F2}R now, best {m.MaxFavourableR:F2}R";

@@ -189,6 +189,20 @@ public sealed class TradingConfig
     public decimal ScratchMaxFavourableR { get; set; } = 0.5m;
 
     /// <summary>
+    /// Only scratch while the trade is still near flat: R must be above this.
+    /// A trade already at -0.7R has 0.3R left to the stop and the whole
+    /// recovery to gain, so it is left to the stop. -1 disables the gate.
+    /// </summary>
+    public decimal ScratchOnlyAboveR { get; set; } = -0.35m;
+
+    /// <summary>
+    /// With nothing open and nothing pending, the equity status line is
+    /// logged at most this often (minutes). Position lines keep the tick
+    /// cadence. 0 = every StatusLogEveryTicks.
+    /// </summary>
+    public int IdleStatusLogMinutes { get; set; } = 5;
+
+    /// <summary>
     /// true  = rest a post-only limit at the near touch; pays no spread but may
     ///         never fill. Worth it only when maker fees are below taker fees.
     /// false = quote the far touch so the order fills immediately; slippage is
@@ -346,6 +360,19 @@ public sealed class SignalConfig
 
     /// <summary>Refuse to trade when ATR% of price is above this - news or panic volatility.</summary>
     public decimal MaxAtrPct { get; set; } = 3.5m;
+
+    /// <summary>
+    /// Trend-pullback trigger: in an ADX trend, a bar that tags the slow EMA
+    /// and closes back on the trend side with RSI in the healthy band votes.
+    /// The only way into a strong trend without chasing an extended RSI.
+    /// Off by default: on 45/90-day replays (Aug-Sep 2026, 4 alts) the extra
+    /// trades were net negative at vol 1.0x and break-even at 1.3x. Turn on
+    /// when the journal shows trend days being missed, not before.
+    /// </summary>
+    public bool PullbackTriggerEnabled { get; set; } = false;
+
+    /// <summary>Resumption bar volume vs its MA required for the pullback trigger to vote.</summary>
+    public decimal PullbackMinVolumeRatio { get; set; } = 1.3m;
 
     /// <summary>
     /// Refuse to trade when the thinner side of the book (top OrderBookDepth

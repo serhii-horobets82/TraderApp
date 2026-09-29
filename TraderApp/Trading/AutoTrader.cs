@@ -97,6 +97,9 @@ public sealed class AutoTrader : IAsyncDisposable
     private readonly Dictionary<string, (EntryContext Context, DateTime PlacedUtc)> _entryContext = new(StringComparer.OrdinalIgnoreCase);
     private DateOnly _lastDigestDay = DateOnly.FromDateTime(DateTime.UtcNow);
     private bool _profitLockNotified;
+    private decimal? _flatEquityRef;
+    private DateTime _lastFlatEquityWarnUtc = DateTime.MinValue;
+    private DateTime _lastIdleStatusUtc = DateTime.MinValue;
 
     public AutoTrader(BotConfig cfg, WhiteBitClient client, Notifications.TelegramNotifier? telegram = null)
     {
@@ -254,6 +257,7 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         await ApplyAccountFeesAsync(ct);
+        await CheckCollateralDenominationAsync(ct);
 
         var equity = summary?.Equity ?? 0m;
         _risk.RestoreOrInitialise(equity);
@@ -323,6 +327,68 @@ public sealed class AutoTrader : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The drawdown / profit locks read collateral equity. If the collateral
+    /// holds anything but the quote currency, its price moves are counted as
+    /// trading PnL: a BTC dip can halt the bot with no trade taken, and a
+    /// rally can trip the profit lock. Say so loudly at boot.
+    /// </summary>
+    private async Task CheckCollateralDenominationAsync(CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, decimal> balances;
+        try { balances = await _client.GetCollateralBalancesAsync(ct); }
+        catch (ApiException ex) { Log.Warn($"could not read collateral balances: {ex.Message}"); return; }
+
+        var quote = _cfg.Trading.Markets.Select(m => m.Split('_').Last()).Distinct().ToList();
+        var foreign = balances
+            .Where(kv => kv.Value > 0 && !quote.Contains(kv.Key, StringComparer.OrdinalIgnoreCase))
+            .OrderByDescending(kv => kv.Value)
+            .Select(kv => $"{kv.Key} {kv.Value:0.########}")
+            .ToList();
+
+        if (foreign.Count == 0)
+        {
+            Log.Info($"collateral is {string.Join("/", quote)} only — equity locks measure trading results");
+            return;
+        }
+
+        var msg = $"collateral holds non-{string.Join("/", quote)} assets: {string.Join(", ", foreign)}. " +
+                  "Their price moves count as PnL in the drawdown/profit locks and in the Telegram balance. " +
+                  "Convert them to the quote currency or move them to the main account.";
+        Log.Warn(msg);
+        _telegram?.Send($"⚠️ {msg}");
+    }
+
+    /// <summary>
+    /// Equity that moves with nothing open and nothing pending is not the
+    /// bot's doing. Warn (at most hourly) so the cause gets looked at.
+    /// </summary>
+    private void NoteFlatEquity(decimal equity, IReadOnlyList<Position> positions)
+    {
+        var flat = positions.All(p => p.AbsAmount <= 0) && _pending.Count == 0;
+        if (!flat || equity <= 0)
+        {
+            _flatEquityRef = null;
+            return;
+        }
+
+        if (_flatEquityRef is not { } reference)
+        {
+            _flatEquityRef = equity;
+            return;
+        }
+
+        var movePct = Math.Abs(equity - reference) / reference * 100m;
+        if (movePct < 0.25m) return;
+        if (DateTime.UtcNow - _lastFlatEquityWarnUtc < TimeSpan.FromHours(1)) { _flatEquityRef = equity; return; }
+
+        _lastFlatEquityWarnUtc = DateTime.UtcNow;
+        _flatEquityRef = equity;
+        Log.Warn($"equity moved {movePct:F2}% ({reference:F2} → {equity:F2}) with no position open — " +
+                 "collateral is not quote-only, or a position exists that the bot cannot see. " +
+                 "The drawdown/profit locks are reacting to that, not to trades.");
+    }
+
     private async Task RefreshMarketRulesAsync(CancellationToken ct)
     {
         _rules = await _client.GetMarketRulesAsync(ct);
@@ -360,6 +426,7 @@ public sealed class AutoTrader : IAsyncDisposable
             return;
         }
         NoteProfitLock(equity);
+        NoteFlatEquity(equity, positions);
 
         ReconcileManaged(positions);
         await ResolveClosedTradesAsync(equity, ct);
@@ -389,7 +456,7 @@ public sealed class AutoTrader : IAsyncDisposable
         //    (real trigger) in the same tick.
         await ConsiderEntriesAsync(equity, openNotional, positions, ct);
 
-        if (ShouldStatusLog())
+        if (ShouldStatusLog() && ShouldIdleStatusLog(positions))
         {
             var scale = _risk.RiskScale();
             Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | " +
@@ -1233,6 +1300,19 @@ public sealed class AutoTrader : IAsyncDisposable
     {
         var every = Math.Max(1, _cfg.Trading.StatusLogEveryTicks);
         return _tick % every == 1;
+    }
+
+    /// <summary>
+    /// Eighteen identical equity lines per 15m bar with nothing open is noise.
+    /// While flat, throttle the status line to IdleStatusLogMinutes.
+    /// </summary>
+    private bool ShouldIdleStatusLog(IReadOnlyList<Position> positions)
+    {
+        var idle = positions.Count == 0 && _pending.Count == 0;
+        if (!idle || _cfg.Trading.IdleStatusLogMinutes <= 0) return true;
+        if (DateTime.UtcNow - _lastIdleStatusUtc < TimeSpan.FromMinutes(_cfg.Trading.IdleStatusLogMinutes)) return false;
+        _lastIdleStatusUtc = DateTime.UtcNow;
+        return true;
     }
 
     /// <summary>

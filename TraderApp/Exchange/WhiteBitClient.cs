@@ -269,6 +269,17 @@ public sealed class WhiteBitClient : IDisposable
     public Task<CollateralSummary?> GetCollateralSummaryAsync(CancellationToken ct) =>
         PostAsync<CollateralSummary>("/api/v4/collateral-account/summary", new Payload(), ct);
 
+    /// <summary>
+    /// POST /api/v4/collateral-account/balance - asset ticker to collateral
+    /// balance in native units. Used to detect non-USDT collateral, whose
+    /// price moves would otherwise masquerade as trading PnL in the equity locks.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, decimal>> GetCollateralBalancesAsync(CancellationToken ct)
+    {
+        var res = await PostAsync<Dictionary<string, decimal>>("/api/v4/collateral-account/balance", new Payload(), ct);
+        return res ?? new Dictionary<string, decimal>();
+    }
+
     /// <summary>POST /api/v4/collateral-account/positions/open</summary>
     public async Task<IReadOnlyList<Position>> GetOpenPositionsAsync(string? market, CancellationToken ct)
     {

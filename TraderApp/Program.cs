@@ -286,7 +286,8 @@ internal static class Program
         Console.WriteLine($"  Book depth    : {(c.Signals.MinBookDepthUsd > 0 ? $"min {c.Signals.MinBookDepthUsd:F0} USDT thin side" : "unchecked")} · journal {(string.IsNullOrWhiteSpace(c.Trading.TradeJournalPath) ? "off" : c.Trading.TradeJournalPath)}");
         Console.WriteLine($"  Trade budget  : {c.Risk.MaxTradesPerHour}/hour, {c.Risk.MaxTradesPerDay}/day UTC");
         Console.WriteLine($"  Loss streak   : {c.Risk.MaxConsecutiveLosses} → {(c.Risk.HaltOnConsecutiveLosses ? "HALT" : $"cooldown {c.Risk.LossCooldownMinutes}m")}");
-        Console.WriteLine($"  Break-even    : {(c.Trading.BreakEvenEnabled ? "on" : "off")} · trail at {c.Trading.TrailStartAtR}R · scratch {c.Trading.ScratchUnprofitableMinutes}m");
+        Console.WriteLine($"  Break-even    : {(c.Trading.BreakEvenEnabled ? "on" : "off")} · trail at {c.Trading.TrailStartAtR}R · scratch {c.Trading.ScratchUnprofitableMinutes}m{(c.Trading.ScratchOnlyAboveR > -1 ? $" if R > {c.Trading.ScratchOnlyAboveR}" : "")}");
+        Console.WriteLine($"  Pullback trig : {(c.Signals.PullbackTriggerEnabled ? $"on (vol ≥ {c.Signals.PullbackMinVolumeRatio}x)" : "off")}");
         Console.WriteLine($"  Session state : {(c.Risk.PersistSessionState ? c.Risk.SessionStatePath : "off")}");
         Console.WriteLine($"  Min score     : {c.Signals.MinScore:F2} with {c.Signals.MinConfirmations}+ confirmations");
         Console.WriteLine($"  Loop          : every {c.Trading.LoopIntervalMs}ms, status every {c.Trading.StatusLogEveryTicks} ticks");
