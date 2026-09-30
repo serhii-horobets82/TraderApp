@@ -26,6 +26,8 @@ public sealed class SignalMonitor
 
     public async Task RunAsync(CancellationToken ct)
     {
+        using var venueScope = Log.VenueScope(_client.ExchangeId);
+
         var rules = await _client.GetMarketRulesAsync(ct);
         Log.Info($"loaded rules for {rules.Count} markets");
 

@@ -117,6 +117,9 @@ public sealed class AutoTrader : IAsyncDisposable
 
     public async Task RunAsync(CancellationToken ct)
     {
+        // Tags every line this venue writes, including nested parallel scans.
+        using var venueScope = Log.VenueScope(_venueLabel);
+
         await BootstrapAsync(ct);
 
         while (!ct.IsCancellationRequested)
@@ -234,14 +237,14 @@ public sealed class AutoTrader : IAsyncDisposable
         {
             if (!_rules.TryGetValue(market, out var r))
             {
-                Log.Warn($"{_venueLabel} {market}: not listed by the exchange - it will be skipped");
+                Log.Warn($"{market}: not listed by the exchange - it will be skipped");
                 continue;
             }
-            Log.Info($"  [{_venueLabel}] {r}");
+            Log.Info($"  {r}");
             if (!r.IsCollateral)
-                Log.Warn($"{_venueLabel} {market}: isCollateral=false - orders on it will be rejected");
+                Log.Warn($"{market}: isCollateral=false - orders on it will be rejected");
             if (string.IsNullOrWhiteSpace(r.TickSize.ToString()) || r.TickSize <= 0)
-                Log.Warn($"{_venueLabel} {market}: no tickSize from the exchange, falling back to moneyPrec");
+                Log.Warn($"{market}: no tickSize from the exchange, falling back to moneyPrec");
         }
 
         CollateralSummary? summary;
@@ -263,27 +266,27 @@ public sealed class AutoTrader : IAsyncDisposable
 
         var equity = summary?.Equity ?? 0m;
         _risk.RestoreOrInitialise(equity);
-        Log.Info($"[{_venueLabel}] equity {equity:F2} | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
+        Log.Info($"equity {equity:F2} | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
 
         if (_risk.Halted)
         {
-            Log.Risk($"[{_venueLabel}] boot with active halt — will park after adopting open positions: {_risk.HaltReason}");
+            Log.Risk($"boot with active halt — will park after adopting open positions: {_risk.HaltReason}");
         }
 
         if (equity <= 0)
-            Log.Warn($"[{_venueLabel}] equity is zero - fund the account before enabling live trading");
+            Log.Warn($"equity is zero - fund the account before enabling live trading");
 
         if (_live && summary is not null && summary.Leverage != 0 && summary.Leverage != _cfg.Trading.Leverage)
         {
-            Log.Info($"[{_venueLabel}] setting account leverage {summary.Leverage}x -> {_cfg.Trading.Leverage}x");
+            Log.Info($"setting account leverage {summary.Leverage}x -> {_cfg.Trading.Leverage}x");
             try { await _client.SetLeverageAsync(_cfg.Trading.Leverage, ct); }
-            catch (ApiException ex) { Log.Warn($"[{_venueLabel}] could not set leverage: {ex.Message}"); }
+            catch (ApiException ex) { Log.Warn($"could not set leverage: {ex.Message}"); }
         }
         else if (_live && summary is not null && summary.Leverage == 0)
         {
             // Bybit reports leverage per position, not on the wallet summary.
             try { await _client.SetLeverageAsync(_cfg.Trading.Leverage, ct); }
-            catch (ApiException ex) { Log.Warn($"[{_venueLabel}] could not set leverage: {ex.Message}"); }
+            catch (ApiException ex) { Log.Warn($"could not set leverage: {ex.Message}"); }
         }
 
         _telegram?.Send(
@@ -295,7 +298,7 @@ public sealed class AutoTrader : IAsyncDisposable
         // Adopt anything already open so it gets managed rather than ignored.
         var positions = await _client.GetOpenPositionsAsync(null, ct);
         foreach (var p in positions.Where(p => p.Market is not null))
-            Log.Warn($"[{_venueLabel}] pre-existing position {p.Market} #{p.PositionId} size {p.Amount} @ {p.BasePrice} - will be adopted and managed");
+            Log.Warn($"pre-existing position {p.Market} #{p.PositionId} size {p.Amount} @ {p.BasePrice} - will be adopted and managed");
     }
 
     /// <summary>
@@ -341,13 +344,33 @@ public sealed class AutoTrader : IAsyncDisposable
     /// trading PnL: a BTC dip can halt the bot with no trade taken, and a
     /// rally can trip the profit lock. Say so loudly at boot.
     /// </summary>
+    /// <summary>
+    /// Quote currency of a market symbol, for either venue's naming.
+    ///
+    /// WhiteBIT separates with an underscore (SOL_USDT); Bybit does not
+    /// (SOLUSDT). Splitting on '_' therefore returned the whole symbol on
+    /// Bybit, so USDT - the actual quote currency - was reported as a foreign
+    /// asset and the bot advised converting away the one thing it should hold.
+    /// </summary>
+    internal static string QuoteCurrencyOf(string market)
+    {
+        if (market.Contains('_')) return market.Split('_')[^1];
+
+        // Longest first, so USDT is not mistaken for USD.
+        foreach (var q in new[] { "USDT", "USDC", "USD", "BTC", "ETH" })
+            if (market.Length > q.Length && market.EndsWith(q, StringComparison.OrdinalIgnoreCase))
+                return q;
+
+        return market;
+    }
+
     private async Task CheckCollateralDenominationAsync(CancellationToken ct)
     {
         IReadOnlyDictionary<string, decimal> balances;
         try { balances = await _client.GetCollateralBalancesAsync(ct); }
         catch (ApiException ex) { Log.Warn($"could not read collateral balances: {ex.Message}"); return; }
 
-        var quote = _cfg.Trading.Markets.Select(m => m.Split('_').Last()).Distinct().ToList();
+        var quote = _cfg.Trading.Markets.Select(QuoteCurrencyOf).Distinct().ToList();
         var foreign = balances
             .Where(kv => kv.Value > 0 && !quote.Contains(kv.Key, StringComparer.OrdinalIgnoreCase))
             .OrderByDescending(kv => kv.Value)

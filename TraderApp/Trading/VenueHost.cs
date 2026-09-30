@@ -56,6 +56,7 @@ public static class VenueHost
         HttpTimeoutSeconds = b.HttpTimeoutSeconds,
         MaxRetries = b.MaxRetries,
         RecvWindowMs = b.RecvWindowMs,
+        PostOnlyEntries = b.PostOnlyEntries,
         Markets = markets.ToList()
     };
 
@@ -170,7 +171,11 @@ public static class VenueHost
             ScratchUnprofitableMinutes = t.ScratchUnprofitableMinutes,
             ScratchMaxFavourableR = t.ScratchMaxFavourableR,
             MaxEntriesPerTick = t.MaxEntriesPerTick,
-            PostOnlyEntries = t.PostOnlyEntries,
+            // Bybit may override: its maker fee is well below taker, unlike
+            // WhiteBIT where the two are equal and resting buys nothing.
+            PostOnlyEntries = venue == ExchangeMode.Bybit && bybit.PostOnlyEntries.HasValue
+                ? bybit.PostOnlyEntries.Value
+                : t.PostOnlyEntries,
             EntryOrderTimeoutSeconds = t.EntryOrderTimeoutSeconds,
             PartialTakeAtR = t.PartialTakeAtR,
             PartialTakeFraction = t.PartialTakeFraction,

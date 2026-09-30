@@ -157,6 +157,17 @@ public sealed class BybitConfig
     public int RecvWindowMs { get; set; } = 5_000;
 
     /// <summary>
+    /// Per-venue override for Trading.PostOnlyEntries. Null = use the shared value.
+    ///
+    /// The right answer genuinely differs by venue. WhiteBIT charges 0.1% maker
+    /// and 0.1% taker, so resting an order earns no discount and only risks not
+    /// filling. Bybit charges 0.036% maker against 0.100% taker, which turns a
+    /// round trip from 0.200% into 0.136% - removing a third of the fee drag on
+    /// a strategy whose edge the fees were already eating.
+    /// </summary>
+    public bool? PostOnlyEntries { get; set; }
+
+    /// <summary>
     /// Must start empty: the configuration binder appends to a pre-populated
     /// list instead of replacing it. Symbols use Bybit form (SOLUSDT).
     /// When empty and ExchangeMode includes Bybit, Trading.Markets are mapped
