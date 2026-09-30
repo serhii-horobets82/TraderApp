@@ -1,3 +1,4 @@
+using System.Net;
 using TraderApp.Configuration;
 using TraderApp.Exchange;
 using TraderApp.Indicators;
@@ -32,6 +33,18 @@ internal sealed class ManagedPosition : ITradeState
 
     /// <summary>Set once a close has been requested, so it is never requested twice.</summary>
     public DateTime? CloseRequestedUtc { get; set; }
+
+    /// <summary>Consecutive failed close attempts, for backoff.</summary>
+    public int CloseFailures { get; set; }
+
+    /// <summary>Earliest time to try closing again. Stops a rejected close retrying every tick.</summary>
+    public DateTime? CloseRetryAfterUtc { get; set; }
+
+    /// <summary>Set once the venue has been alerted that closes are being rejected.</summary>
+    public bool CloseBlockedNotified { get; set; }
+
+    /// <summary>Last Telegram reminder that the exit is still blocked; reminders are hourly, not per retry.</summary>
+    public DateTime? CloseBlockedRemindedUtc { get; set; }
 
     /// <summary>Why the bot decided to close, kept for the close notification.</summary>
     public string LastExitReason { get; set; } = "";
@@ -284,8 +297,16 @@ public sealed class AutoTrader : IAsyncDisposable
         }
         else if (_live && summary is not null && summary.Leverage == 0)
         {
-            // Bybit reports leverage per position, not on the wallet summary.
-            try { await _client.SetLeverageAsync(_cfg.Trading.Leverage, ct); }
+            // Bybit reports leverage per position, not on the wallet summary,
+            // so the summary line above always reads 0x. Say what was applied -
+            // silence here makes "leverage 0x" look like leverage was never set.
+            try
+            {
+                await _client.SetLeverageAsync(_cfg.Trading.Leverage, ct);
+                Log.Info($"leverage {_cfg.Trading.Leverage}x applied to " +
+                         $"{_cfg.Trading.Markets.Count} symbol(s) — the 0x above is the wallet " +
+                         "summary, which does not carry per-symbol leverage on this venue");
+            }
             catch (ApiException ex) { Log.Warn($"could not set leverage: {ex.Message}"); }
         }
 
@@ -1165,7 +1186,26 @@ public sealed class AutoTrader : IAsyncDisposable
             return;
         }
 
-        Log.Trade($"{pos.Market} #{pos.PositionId}: closing - {exitReason} | uPnL {floating:F4}");
+        // A rejected close used to retry on the very next tick. Against a
+        // permanent rejection (the exchange disabling margin trading on the
+        // account) that became one failed API call and one Telegram error every
+        // two seconds, indefinitely. The gate sits here, after the stop/high-water
+        // updates, so a stuck position keeps being tracked and keeps appearing in
+        // the status log while it waits.
+        if (m.CloseRetryAfterUtc is { } retryAfter && DateTime.UtcNow < retryAfter)
+        {
+            if (ShouldStatusLog())
+                Log.Info($"{pos.Market} #{pos.PositionId}: exit pending ({exitReason}) - " +
+                         $"close retry in {(retryAfter - DateTime.UtcNow).TotalSeconds:F0}s after {m.CloseFailures} failure(s) | " +
+                         $"mark {mark} | uPnL {floating:F4} ({rMultiple:F2}R)");
+            return;
+        }
+
+        // First attempt is a trade event; retries are console-only so a blocked
+        // exit does not keep pinging Telegram.
+        var closingLine = $"{pos.Market} #{pos.PositionId}: closing - {exitReason} | uPnL {floating:F4}";
+        if (m.CloseFailures == 0) Log.Trade(closingLine);
+        else Log.Info($"{closingLine} (retry {m.CloseFailures + 1})");
 
         // Stash why, so the close notification can say more than "closed". The
         // exchange's closed-PnL record has the prices and timing but not the
@@ -1185,13 +1225,97 @@ public sealed class AutoTrader : IAsyncDisposable
             // close-position also cancels the attached OTO protection, which a
             // bare reduceOnly order would leave orphaned on the book.
             await _client.ClosePositionAsync(pos.PositionId, pos.Market, pos.PositionSide, ct);
-            Log.Trade($"{pos.Market} #{pos.PositionId}: close requested");
+            var failures = m.CloseFailures;
+            m.CloseFailures = 0;
+            m.CloseRetryAfterUtc = null;
+            Log.Trade($"{pos.Market} #{pos.PositionId}: close requested" +
+                      (failures > 0 ? $" (accepted after {failures} rejected attempt(s))" : ""));
+
+            if (m.CloseBlockedNotified)
+            {
+                // The restriction that blocked us has lifted. Entries stay
+                // paused on purpose: whatever the exchange did to the account
+                // is for the operator to look at before the bot trades again.
+                m.CloseBlockedNotified = false;
+                _telegram?.Send(
+                    $"✅ {_venueLabel} accepted the close of {Short(pos.Market)} " +
+                    $"{(m.IsLong ? "long" : "short")} after {failures} rejected attempt(s).\n" +
+                    "Entries are still paused on this venue - send /resume once you have checked the account.");
+            }
         }
         catch (ApiException ex)
         {
-            Log.Error($"{pos.Market} #{pos.PositionId}: close failed - {ex.Message}");
+            m.CloseFailures++;
             m.CloseRequestedUtc = null;
+
+            if (IsExitBlocked(ex))
+            {
+                // The exchange is refusing to let us out. Retrying every tick
+                // cannot help, and the only safe response is to stop opening
+                // anything new: a bot that cannot exit must not enter. Pause
+                // rather than halt, because halting triggers a flatten that
+                // would fail the same way.
+                m.CloseRetryAfterUtc = DateTime.UtcNow.AddMinutes(5);
+
+                if (!m.CloseBlockedNotified)
+                {
+                    m.CloseBlockedNotified = true;
+                    m.CloseBlockedRemindedUtc = DateTime.UtcNow;
+                    Log.Error($"{pos.Market} #{pos.PositionId}: EXIT BLOCKED by the exchange - {ex.Message}");
+                    _risk.Pause("- the venue is rejecting closes, so new positions could not be managed");
+
+                    _telegram?.Send(
+                        $"🚫 {_venueLabel} is refusing to close positions\n" +
+                        $"{Short(pos.Market)} {(m.IsLong ? "long" : "short")} is stuck open.\n" +
+                        $"{ex.Message}\n\n" +
+                        "Entries are paused here. Close it manually in the exchange UI and " +
+                        "check the account restriction. Retrying every 5 min in case it lifts; " +
+                        "send /resume once the account is trading again.");
+                }
+                else
+                {
+                    // Console only. A Telegram line per retry is the flood this
+                    // code exists to prevent; one reminder an hour is enough.
+                    Log.Info($"{pos.Market} #{pos.PositionId}: exit still blocked (attempt {m.CloseFailures}) - next try in 5 min");
+                    if (DateTime.UtcNow - (m.CloseBlockedRemindedUtc ?? DateTime.MinValue) >= TimeSpan.FromHours(1))
+                    {
+                        m.CloseBlockedRemindedUtc = DateTime.UtcNow;
+                        _telegram?.Send(
+                            $"🚫 {_venueLabel}: {Short(pos.Market)} {(m.IsLong ? "long" : "short")} still cannot be closed " +
+                            $"({m.CloseFailures} attempts). Close it in the exchange UI.");
+                    }
+                }
+                return;
+            }
+
+            // Transient: back off instead of hammering, 5s doubling to 5 min.
+            // The first failure and every fifth one reach Telegram; the rest
+            // stay in the console so a flaky endpoint is visible but not noisy.
+            var backoff = TimeSpan.FromSeconds(Math.Min(300, 5 * Math.Pow(2, Math.Min(m.CloseFailures - 1, 8))));
+            m.CloseRetryAfterUtc = DateTime.UtcNow + backoff;
+            var line = $"{pos.Market} #{pos.PositionId}: close failed (attempt {m.CloseFailures}, " +
+                       $"retrying in {backoff.TotalSeconds:F0}s) - {ex.Message}";
+            if (m.CloseFailures == 1 || m.CloseFailures % 5 == 0) Log.Error(line);
+            else Log.Info(line);
         }
+    }
+
+    /// <summary>
+    /// Whether the exchange is refusing the close outright rather than failing
+    /// transiently. These do not get better by retrying: the account has lost
+    /// the permission the exit needs.
+    /// </summary>
+    public static bool IsExitBlocked(ApiException ex)
+    {
+        // 429 / 5xx are retried inside the client already; if they still
+        // surface here the venue is struggling, not refusing.
+        if (ex.Status == HttpStatusCode.TooManyRequests || (int)ex.Status >= 500) return false;
+
+        var body = ex.Body ?? "";
+        return body.Contains("trading restrictions", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("Margin trading is not available", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("account is restricted", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("\"code\":10008", StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -551,6 +551,17 @@ Logs are written to `bin/<config>/net10.0/logs/trader-YYYYMMDD.log`.
   deliberately does **not** close positions — they keep their exchange-side
   stop, and force-closing on restart would turn routine maintenance into a
   realised loss.
+- **When the exchange refuses to close a position.** WhiteBIT can disable margin
+  trading on an account (`HTTP 422, code 10008: Margin trading is not available
+  for your account due to trading restrictions`). The bot treats that as
+  permanent: it sends one `🚫 … is refusing to close positions` alert, pauses
+  new entries on that venue (a bot that cannot exit must not enter), keeps
+  tracking the stuck position in the status log, retries the close every
+  5 minutes and reminds you hourly. Close the position in the exchange UI and
+  sort out the restriction with WhiteBIT; when a retry eventually succeeds you
+  get a `✅` and entries stay paused until you send `/resume`. Any other close
+  failure is retried with a 5 s → 5 min backoff, with only the first and every
+  fifth failure reaching Telegram.
 - **Hedge mode.** The client passes through `positionSide`; if you enable hedge
   mode on the account, set it on the order payloads.
 - **Rate limits.** Private requests are serialised with a configurable minimum

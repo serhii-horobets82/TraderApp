@@ -208,13 +208,17 @@ public sealed class RiskManager
         Persist();
     }
 
-    /// <summary>Stop opening new positions. Existing ones stay managed.</summary>
-    public bool Pause()
+    /// <summary>
+    /// Stop opening new positions. Existing ones stay managed. The reason is
+    /// only for the log: "by command" is the operator, anything else is the
+    /// bot protecting itself (e.g. the venue refusing to close positions).
+    /// </summary>
+    public bool Pause(string reason = "by command")
     {
         if (EntriesPaused) return false;
         EntriesPaused = true;
         PausedAtUtc = DateTime.UtcNow;
-        Log.Risk("entries PAUSED by command - open positions stay managed");
+        Log.Risk($"entries PAUSED {reason} - open positions stay managed");
         Persist();
         return true;
     }
