@@ -188,13 +188,48 @@ internal static class Program
             }
             else
             {
+                var venueFailures = 0;
+
+                // Task.WhenAll only surfaces a fault once EVERY task has
+                // finished. With one venue running forever, a second venue that
+                // throws on startup left its exception unobserved - the runner
+                // logged "starting" and then went silent with no error at all.
+                // Each venue is therefore wrapped so its failure is reported the
+                // moment it happens.
+                async Task RunVenueAsync(string label, AutoTrader trader)
+                {
+                    try
+                    {
+                        await trader.RunAsync(cts.Token);
+                        if (!cts.IsCancellationRequested)
+                            Log.Warn($"[{label}] runner returned on its own - this venue is no longer trading");
+                    }
+                    catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                    {
+                        // Normal shutdown.
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref venueFailures);
+
+                        // Deliberately does NOT stop the other venues: killing a
+                        // healthy venue that holds live positions because a
+                        // different one cannot reach its exchange would be worse
+                        // than running half the bot. But it must be loud.
+                        Log.Error($"[{label}] runner FAILED: {ex}");
+                        telegram.Send(
+                            $"⛔ {label} stopped\n{ex.Message}\n" +
+                            "Other venues keep running; positions there are unaffected.");
+                    }
+                }
+
                 var runs = new List<Task>();
                 foreach (var (label, venueCfg, client) in venues)
                 {
                     Log.Info($"[{label}] starting runner · markets {string.Join(", ", venueCfg.Trading.Markets)}");
                     var trader = new AutoTrader(venueCfg, client, telegram);
                     traders.Add(trader);
-                    runs.Add(trader.RunAsync(cts.Token));
+                    runs.Add(RunVenueAsync(label, trader));
                 }
 
                 if (traders.Count == 1)
@@ -214,6 +249,16 @@ internal static class Program
                 }
 
                 await Task.WhenAll(runs);
+
+                // Every venue is gone and nobody asked us to stop: exit non-zero
+                // so the supervisor restarts rather than leaving a live process
+                // that trades nothing.
+                if (venueFailures > 0 && !cts.IsCancellationRequested)
+                {
+                    stopReason = $"all {venueFailures} venue runner(s) failed";
+                    Log.Error(stopReason);
+                    return exitRestartRequested;
+                }
             }
 
             // The listener is cooperative and swallows its own errors; once the

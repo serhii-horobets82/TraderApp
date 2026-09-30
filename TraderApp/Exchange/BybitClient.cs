@@ -494,7 +494,7 @@ public sealed class BybitClient : IExchangeClient
                 if (!resp.IsSuccessStatusCode)
                 {
                     if (!ShouldRetry(resp.StatusCode) || attempt >= _cfg.MaxRetries)
-                        throw new ApiException(pathAndQuery, resp.StatusCode, body);
+                        throw new ApiException(pathAndQuery, resp.StatusCode, body + HttpHint(resp.StatusCode));
                 }
                 else
                 {
@@ -588,8 +588,42 @@ public sealed class BybitClient : IExchangeClient
         var code = root.Value<int?>("retCode") ?? -1;
         if (code == 0) return;
         var msg = root.Value<string>("retMsg") ?? "unknown";
-        throw new ApiException(endpoint, HttpStatusCode.BadRequest, $"retCode={code} {msg} | {Truncate(body)}");
+        throw new ApiException(endpoint, HttpStatusCode.BadRequest,
+            $"retCode={code} {msg}{HintFor(code)} | {Truncate(body)}");
     }
+
+    /// <summary>
+    /// Bybit's retCodes are numeric and the messages terse. These are the ones
+    /// that look like a broken client but are really account or hosting
+    /// configuration, and each cost real time to work out from the code alone.
+    /// </summary>
+    private static string HintFor(int code) => code switch
+    {
+        10003 => " — API key invalid. Check BYBIT_API_KEY, and that the key is for api.bybit.com and not a demo/testnet key.",
+        10004 => " — signature failed. Usually a wrong secret, or stray whitespace in it.",
+        10005 => " — permission denied. The key needs Contract → Orders & Positions (and Unified Trading → Trade on a UTA).",
+        10006 => " — rate limited.",
+        10010 => " — request IP not in the key's whitelist. Railway Hobby has no static egress IP, so either remove the IP binding (key then expires every 90 days) or move to a plan with static IPs.",
+        10016 => " — Bybit service error on their side, not yours.",
+        33004 => " — API key expired. Unbound keys expire 90 days after creation; renew it in the Bybit UI.",
+        _ => ""
+    };
+
+    /// <summary>
+    /// Bybit answers 403 to requests from US and Mainland China IP addresses.
+    /// On a PaaS that is a hosting-region problem, not a credentials problem,
+    /// and the raw body does not say so.
+    /// </summary>
+    private static string HttpHint(HttpStatusCode status) => status switch
+    {
+        HttpStatusCode.Forbidden =>
+            "  [hint] Bybit blocks US and Mainland China IPs with 403. If this runs on Railway/Render, " +
+            "check the service region - the default is US. Deploy to an EU/Asia region, or use the " +
+            "regional Bybit endpoint for where you are hosted.",
+        HttpStatusCode.Unauthorized =>
+            "  [hint] key rejected. Verify BYBIT_API_KEY/SECRET and that they are mainnet, not testnet.",
+        _ => ""
+    };
 
     private static bool ShouldRetry(HttpStatusCode s) =>
         s == HttpStatusCode.TooManyRequests || (int)s >= 500;
