@@ -212,10 +212,11 @@ public sealed class BybitClient : IExchangeClient
 
         if (candles.Count > 0)
         {
-            var validUntil = closedOnly && duration > TimeSpan.Zero
-                ? candles[^1].OpenTime + duration
-                : DateTime.UtcNow.AddSeconds(5);
-            if (validUntil > DateTime.UtcNow)
+            var now = DateTime.UtcNow;
+            var validUntil = closedOnly
+                ? CandleInterval.ClosedBarValidUntil(candles[^1].OpenTime, duration, now)
+                : now.AddSeconds(5);
+            if (validUntil > now)
                 _klineCache[cacheKey] = (candles, validUntil);
         }
 
@@ -499,6 +500,11 @@ public sealed class BybitClient : IExchangeClient
                 else
                 {
                     var root = JObject.Parse(body);
+                    if (IsRateLimited(root) && attempt < _cfg.MaxRetries)
+                    {
+                        await Task.Delay(RateLimitDelay(resp, attempt), ct);
+                        continue;
+                    }
                     EnsureOk(pathAndQuery, root, body);
                     return root;
                 }
@@ -510,6 +516,30 @@ public sealed class BybitClient : IExchangeClient
 
             await Task.Delay(BackoffDelay(attempt), ct);
         }
+    }
+
+    /// <summary>
+    /// Bybit reports rate limiting as HTTP 200 with retCode 10006, so the
+    /// HTTP-status retry path never sees it. Without this, one throttled call
+    /// surfaced as an exception and cost the whole entry scan for that tick.
+    /// </summary>
+    private static bool IsRateLimited(JObject root) => root.Value<int?>("retCode") == 10006;
+
+    /// <summary>
+    /// Wait until the window resets when Bybit says when that is
+    /// (X-Bapi-Limit-Reset-Timestamp, ms epoch), otherwise plain backoff.
+    /// Capped so a bogus header cannot stall a tick for long.
+    /// </summary>
+    private static TimeSpan RateLimitDelay(HttpResponseMessage resp, int attempt)
+    {
+        if (resp.Headers.TryGetValues("X-Bapi-Limit-Reset-Timestamp", out var values) &&
+            long.TryParse(values.FirstOrDefault(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var resetMs))
+        {
+            var wait = DateTimeOffset.FromUnixTimeMilliseconds(resetMs) - DateTimeOffset.UtcNow;
+            if (wait > TimeSpan.Zero)
+                return TimeSpan.FromMilliseconds(Math.Min(5_000, wait.TotalMilliseconds + 100));
+        }
+        return BackoffDelay(attempt);
     }
 
     private async Task<JObject?> GetPrivateAsync(string pathAndQuery, CancellationToken ct)
@@ -533,6 +563,11 @@ public sealed class BybitClient : IExchangeClient
             if (resp.IsSuccessStatusCode)
             {
                 var root = JObject.Parse(body);
+                if (IsRateLimited(root) && attempt < _cfg.MaxRetries)
+                {
+                    await Task.Delay(RateLimitDelay(resp, attempt), ct);
+                    continue;
+                }
                 EnsureOk(path, root, body);
                 return root;
             }
@@ -564,6 +599,11 @@ public sealed class BybitClient : IExchangeClient
             if (resp.IsSuccessStatusCode)
             {
                 var root = JObject.Parse(body);
+                if (IsRateLimited(root) && attempt < _cfg.MaxRetries)
+                {
+                    await Task.Delay(RateLimitDelay(resp, attempt), ct);
+                    continue;
+                }
                 EnsureOk(path, root, body);
                 return root;
             }

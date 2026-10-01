@@ -565,7 +565,11 @@ Logs are written to `bin/<config>/net10.0/logs/trader-YYYYMMDD.log`.
 - **Hedge mode.** The client passes through `positionSide`; if you enable hedge
   mode on the account, set it on the order payloads.
 - **Rate limits.** Private requests are serialised with a configurable minimum
-  gap and retried with exponential backoff and jitter on 429/5xx.
+  gap and retried with exponential backoff and jitter on 429/5xx. Bybit reports
+  throttling as HTTP 200 with `retCode 10006`; that is retried too, honouring
+  `X-Bapi-Limit-Reset-Timestamp` when present. Closed-bar klines are cached per
+  market/interval until the next bar closes, so steady-state traffic is a
+  handful of calls per tick, not a history download per market.
 
 ---
 

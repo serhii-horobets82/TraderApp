@@ -201,10 +201,11 @@ public sealed class WhiteBitClient : IExchangeClient
 
         if (candles.Count > 0)
         {
-            var validUntil = closedOnly && duration > TimeSpan.Zero
-                ? candles[^1].OpenTime + duration
-                : DateTime.UtcNow.AddSeconds(5);
-            if (validUntil > DateTime.UtcNow)
+            var now = DateTime.UtcNow;
+            var validUntil = closedOnly
+                ? CandleInterval.ClosedBarValidUntil(candles[^1].OpenTime, duration, now)
+                : now.AddSeconds(5);
+            if (validUntil > now)
                 _klineCache[cacheKey] = (candles, validUntil);
         }
 

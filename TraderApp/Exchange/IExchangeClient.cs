@@ -87,6 +87,33 @@ public static class CandleInterval
             _ => TimeSpan.Zero
         };
     }
+
+    /// <summary>
+    /// How long a closed-bar kline response stays valid. The newest closed bar
+    /// opened at <paramref name="lastClosedOpen"/>; nothing new can appear
+    /// until the bar after it closes, i.e. two durations later.
+    ///
+    /// The previous formula used one duration - the bar's own close time, which
+    /// is always already in the past for a closed bar - so the cache was never
+    /// populated and every 2s tick re-downloaded 15m and 1h history for every
+    /// market. On Bybit that showed up as retCode 10006 (rate limited) within
+    /// seconds of boot.
+    ///
+    /// Right after a boundary the exchange may still be finalising the bar or
+    /// not yet have emitted the forming one, so for the first few seconds the
+    /// result is only trusted briefly.
+    /// </summary>
+    public static DateTime ClosedBarValidUntil(DateTime lastClosedOpen, TimeSpan duration, DateTime nowUtc)
+    {
+        if (duration <= TimeSpan.Zero) return nowUtc.AddSeconds(5);
+
+        var closedAt = lastClosedOpen + duration;
+        if (nowUtc - closedAt < TimeSpan.FromSeconds(5))
+            return nowUtc.AddSeconds(5);
+
+        // Stale data (older than one full bar behind) is not worth holding.
+        return closedAt + duration;
+    }
 }
 
 /// <summary>Stable synthetic position id for venues that do not expose WhiteBIT-style positionId.</summary>

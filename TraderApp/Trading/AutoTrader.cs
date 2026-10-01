@@ -100,6 +100,7 @@ public sealed class AutoTrader : IAsyncDisposable
     private readonly Dictionary<string, DateTime> _lastSizingRejectLog = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _lastEntryVetoKey = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _closedEntryBarOpen = DateTime.MinValue;
+    private int _barProbeFailures;
     private int _tick;
 
     private decimal _lastEquity;
@@ -747,7 +748,24 @@ public sealed class AutoTrader : IAsyncDisposable
             return;
         }
 
-        var newClosedBar = await NoteClosedEntryBarAsync(ct);
+        // The bar probe is one public kline call. If the venue throttles or
+        // drops it, skip this tick's scan rather than let the exception abort
+        // the tick (exits have already run above, but the status line and
+        // heartbeat would be lost too). First failure in a row goes to
+        // Telegram, repeats stay in the console.
+        bool newClosedBar;
+        try
+        {
+            newClosedBar = await NoteClosedEntryBarAsync(ct);
+            _barProbeFailures = 0;
+        }
+        catch (ApiException ex)
+        {
+            _barProbeFailures++;
+            var line = $"entry scan skipped this tick ({_barProbeFailures} in a row) - {ex.Message}";
+            if (_barProbeFailures == 1) Log.Warn(line); else Log.Info(line);
+            return;
+        }
 
         var candidates = new List<ScannedEntry>();
         var scans = new List<Task<ScannedEntry?>>();
