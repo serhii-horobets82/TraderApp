@@ -110,9 +110,11 @@ cannot dilute a real setup.
 - crowded perp funding, or a fresh BTC 1h flip against the alt (stand-aside rules)
 - not enough candle history, empty book side
 
-**Time gates** (in the risk layer, not the signal): new entries only between
-`EntryHoursUtcStart` and `EntryHoursUtcEnd` (06–22 UTC — Asian-session alt
-books are thin and spreads wide), and Saturday/Sunday size is scaled by
+**Time gates** (in the risk layer, not the signal): new entries can be limited
+to a UTC window with `EntryHoursUtcStart` / `EntryHoursUtcEnd`. The shipped
+config trades 24h (both 0); the earlier 06–22 window was dropped because the
+book-depth and spread vetoes already catch the thin Asian-session setups the
+window was meant to avoid. Saturday/Sunday size is scaled by
 `WeekendRiskScale` (0.5). Open positions are managed at every hour.
 
 ADX decides which playbook is live: above `AdxTrendThreshold` (22) the bot takes
@@ -237,7 +239,7 @@ The settings worth knowing:
 | `Risk.MaxNotionalPerPositionUsd` | `80` | Must be ≥ what 0.25% risk sizes to (~70 USDT on SOL at 215 equity) or it silently clips the risk |
 | `Risk.ProfitLockRiskScale` | `0.5` | After the lock: keep trading at this risk scale; `0` halts for the day |
 | `Risk.WeekendRiskScale` | `0.5` | Risk multiplier on Saturday/Sunday UTC |
-| `Trading.EntryHoursUtcStart` / `End` | `6` / `22` | New entries only in this UTC window (equal = always) |
+| `Trading.EntryHoursUtcStart` / `End` | `0` / `0` | New entries only in this UTC window (equal = always, e.g. 6/22 for Europe+US sessions) |
 | `Trading.PartialTakeAtR` / `PartialTakeFraction` | `1.5` / `0.5` | Bank half at 1.5R, rest to break-even (0 = off) |
 | `Trading.MaxPositionMinutes` | `300` | Time stop; must give a 3×ATR target room on 15m bars |
 | `Trading.TradeJournalPath` | `data/trades.jsonl` | One JSON line per closed trade with its entry context |
