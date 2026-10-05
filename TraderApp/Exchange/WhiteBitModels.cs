@@ -325,6 +325,9 @@ public sealed class OrderBook
     [JsonProperty("asks")] public List<List<decimal>> Asks { get; set; } = new();
     [JsonProperty("bids")] public List<List<decimal>> Bids { get; set; } = new();
 
+    /// <summary>When this process last received the book. Zero means unknown.</summary>
+    [JsonIgnore] public DateTime ReceivedAtUtc { get; set; }
+
     public decimal? BestAsk => Asks.Count > 0 && Asks[0].Count > 0 ? Asks[0][0] : null;
     public decimal? BestBid => Bids.Count > 0 && Bids[0].Count > 0 ? Bids[0][0] : null;
 

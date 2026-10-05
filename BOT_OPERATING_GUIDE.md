@@ -39,6 +39,10 @@ All eligible symbols are scanned and ranked; the strongest allowed setup is sele
 
 With `PostOnlyEntries=false`, the bot crosses the visible spread with a bounded limit: buys at ask and sells at bid. With `PostOnlyEntries=true`, it rests at the near touch and tracks passive fill quality.
 
+For Bybit, a public WebSocket maintains a local 50-level order book. It applies snapshots and deltas, reconnects with backoff, and sends heartbeats. A missing or stale stream book automatically falls back to REST, so a WebSocket outage cannot turn into a blind entry. The private Bybit stream separately wakes the loop after order, fill and position updates; REST still reconciles the resulting state.
+
+Passive entries also pass a maker-quality gate. The intended touch must have enough USDT depth, the order cannot consume more than the configured fraction of that queue, the five-level imbalance must support the intended direction, and the book and scan must be fresh. These checks apply only to post-only orders and are configurable under `Trading.Maker*`.
+
 The target must cover the real round-trip fee, the whole observed spread for a crossing entry, and `Risk.MinNetEdgePct`. Prices and amounts are snapped to venue rules before submission. Every order has a client order ID.
 
 Timed-out entries are cancelled carefully: a cancellation acknowledgement is not treated as a final outcome. The bot waits for the final state so a partial fill during cancellation remains risk-accounted and managed.

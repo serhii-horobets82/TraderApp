@@ -56,6 +56,9 @@ public static class VenueHost
         HttpTimeoutSeconds = b.HttpTimeoutSeconds,
         MaxRetries = b.MaxRetries,
         RecvWindowMs = b.RecvWindowMs,
+        PrivateWebSocketEnabled = b.PrivateWebSocketEnabled,
+        PublicOrderBookWebSocketEnabled = b.PublicOrderBookWebSocketEnabled,
+        PublicOrderBookFreshnessMs = b.PublicOrderBookFreshnessMs,
         PostOnlyEntries = b.PostOnlyEntries,
         Markets = markets.ToList()
     };
@@ -185,6 +188,12 @@ public static class VenueHost
                 ? bybit.PostOnlyEntries.Value
                 : t.PostOnlyEntries,
             EntryOrderTimeoutSeconds = t.EntryOrderTimeoutSeconds,
+            MakerQualityEnabled = t.MakerQualityEnabled,
+            MakerMinDirectionalImbalance = t.MakerMinDirectionalImbalance,
+            MakerMinTopLevelDepthUsd = t.MakerMinTopLevelDepthUsd,
+            MakerMaxQueueFraction = t.MakerMaxQueueFraction,
+            MakerMaxBookAgeMs = t.MakerMaxBookAgeMs,
+            MakerMaxSignalAgeMs = t.MakerMaxSignalAgeMs,
             PostOnlyFillWarningMinAttempts = t.PostOnlyFillWarningMinAttempts,
             PostOnlyFillWarningMinRatePct = t.PostOnlyFillWarningMinRatePct,
             PostOnlyFillWarningWindowMinutes = t.PostOnlyFillWarningWindowMinutes,

@@ -25,6 +25,7 @@ public sealed class BybitClient : IExchangeClient
     private readonly BybitConfig _cfg;
     private readonly HttpClient _http;
     private readonly BybitPrivateStream? _privateStream;
+    private readonly BybitPublicOrderBookStream? _publicOrderBooks;
     private readonly ConcurrentDictionary<string, (IReadOnlyList<Candle> Candles, DateTime ValidUntilUtc)> _klineCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<IReadOnlyList<Candle>>> _klineInflight = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _futuresGate = new();
@@ -48,6 +49,8 @@ public sealed class BybitClient : IExchangeClient
         // Tests use a fake REST transport and must never attempt a live socket.
         if (handler is null && cfg.PrivateWebSocketEnabled)
             _privateStream = new BybitPrivateStream(cfg);
+        if (handler is null && cfg.PublicOrderBookWebSocketEnabled)
+            _publicOrderBooks = new BybitPublicOrderBookStream(cfg);
     }
 
     // ── Public ──────────────────────────────────────────────────────────
@@ -96,6 +99,9 @@ public sealed class BybitClient : IExchangeClient
     public async Task<OrderBook?> GetOrderBookAsync(string market, int limit, CancellationToken ct)
     {
         var clamped = Math.Clamp(limit, 1, 200);
+        if (_publicOrderBooks?.TryGetFresh(market, clamped, out var liveBook) == true)
+            return liveBook;
+
         var path = $"/v5/market/orderbook?category={Uri.EscapeDataString(_cfg.Category)}" +
                    $"&symbol={Uri.EscapeDataString(market)}&limit={clamped}";
         var root = await GetPublicAsync(path, ct);
@@ -105,7 +111,8 @@ public sealed class BybitClient : IExchangeClient
         var book = new OrderBook
         {
             TickerId = result.Value<string>("s") ?? market,
-            Timestamp = result.Value<long?>("ts") ?? 0
+            Timestamp = result.Value<long?>("ts") ?? 0,
+            ReceivedAtUtc = DateTime.UtcNow
         };
 
         foreach (var level in result["b"] as JArray ?? new JArray())
@@ -119,6 +126,7 @@ public sealed class BybitClient : IExchangeClient
             book.Asks.Add(new List<decimal> { ParseDec(pair[0]?.ToString()), ParseDec(pair[1]?.ToString()) });
         }
 
+        _publicOrderBooks?.SeedRestSnapshot(market, book);
         return book;
     }
 
@@ -839,6 +847,7 @@ public sealed class BybitClient : IExchangeClient
     public void Dispose()
     {
         _privateStream?.Dispose();
+        _publicOrderBooks?.Dispose();
         _http.Dispose();
     }
 }

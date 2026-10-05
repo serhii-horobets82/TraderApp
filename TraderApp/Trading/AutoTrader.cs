@@ -880,7 +880,7 @@ public sealed class AutoTrader : IAsyncDisposable
 
     private sealed record ScannedEntry(
         TradeSignal Signal, OrderBook Book, MarketRules Rules, decimal EntryPrice, SizingResult Sizing,
-        StandAsideSnapshot? Aside, decimal ConvictionScale);
+        StandAsideSnapshot? Aside, decimal ConvictionScale, DateTime ScannedAtUtc);
 
     private async Task ConsiderEntriesAsync(
         decimal equity, decimal openNotional, IReadOnlyList<Position> positions, CancellationToken ct)
@@ -1079,7 +1079,17 @@ public sealed class AutoTrader : IAsyncDisposable
             return null;
         }
 
-        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside, conviction);
+        if (_cfg.Trading.PostOnlyEntries)
+        {
+            var maker = MakerQuality.Evaluate(book, isLong, sizing.Amount, _cfg.Trading, DateTime.UtcNow);
+            if (!maker.Allowed)
+            {
+                Log.Info($"{market}: {signal.Direction} setup rejected by maker quality - {maker.Reason}");
+                return null;
+            }
+        }
+
+        return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside, conviction, DateTime.UtcNow);
     }
 
     private bool ShouldLogSizingReject(string market)
@@ -1098,6 +1108,13 @@ public sealed class AutoTrader : IAsyncDisposable
         var rules = scanned.Rules;
         var sizing = scanned.Sizing;
         var isLong = signal.Direction == Signals.Direction.Long;
+
+        if (_cfg.Trading.PostOnlyEntries && _cfg.Trading.MakerQualityEnabled &&
+            DateTime.UtcNow - scanned.ScannedAtUtc > TimeSpan.FromMilliseconds(_cfg.Trading.MakerMaxSignalAgeMs))
+        {
+            Log.Info($"{market}: passive entry skipped - scan is {(DateTime.UtcNow - scanned.ScannedAtUtc).TotalMilliseconds:F0}ms old");
+            return;
+        }
 
         var riskQuote = sizing.Amount * Math.Abs(scanned.EntryPrice - sizing.StopPrice);
         Log.Trade(

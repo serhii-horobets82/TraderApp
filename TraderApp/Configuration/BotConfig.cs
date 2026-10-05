@@ -115,6 +115,18 @@ public sealed class BotConfig
             errors.Add("Trading.PostOnlyFillWarningMinRatePct must be in [0, 100].");
         if (Trading.PostOnlyFillWarningWindowMinutes is < 1 or > 1440)
             errors.Add("Trading.PostOnlyFillWarningWindowMinutes must be between 1 and 1440.");
+        if (Bybit.PublicOrderBookFreshnessMs is < 250 or > 30_000)
+            errors.Add("Bybit.PublicOrderBookFreshnessMs must be between 250 and 30000.");
+        if (Trading.MakerMinDirectionalImbalance is < 0 or > 1)
+            errors.Add("Trading.MakerMinDirectionalImbalance must be in [0, 1].");
+        if (Trading.MakerMinTopLevelDepthUsd < 0)
+            errors.Add("Trading.MakerMinTopLevelDepthUsd must be non-negative.");
+        if (Trading.MakerMaxQueueFraction is <= 0 or > 1)
+            errors.Add("Trading.MakerMaxQueueFraction must be in (0, 1].");
+        if (Trading.MakerMaxBookAgeMs is < 100 or > 30_000)
+            errors.Add("Trading.MakerMaxBookAgeMs must be between 100 and 30000.");
+        if (Trading.MakerMaxSignalAgeMs is < 100 or > 60_000)
+            errors.Add("Trading.MakerMaxSignalAgeMs must be between 100 and 60000.");
         if (Risk.ProfitLockRiskScale is < 0 or > 1)
             errors.Add("Risk.ProfitLockRiskScale must be in [0, 1]. 0 halts on the profit lock.");
         if (Risk.CollateralValuationRefreshSeconds is < 5 or > 300)
@@ -174,6 +186,15 @@ public sealed class BybitConfig
     /// Disable temporarily if a network path blocks WebSockets.
     /// </summary>
     public bool PrivateWebSocketEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Maintain a local 50-level linear order book from Bybit's public stream.
+    /// REST remains an automatic fallback when the stream is unavailable/stale.
+    /// </summary>
+    public bool PublicOrderBookWebSocketEnabled { get; set; } = true;
+
+    /// <summary>Maximum age of a streamed book before the client falls back to REST.</summary>
+    public int PublicOrderBookFreshnessMs { get; set; } = 3_000;
 
     /// <summary>
     /// Per-venue override for Trading.PostOnlyEntries. Null = use the shared value.
@@ -330,6 +351,28 @@ public sealed class TradingConfig
 
     /// <summary>Cancel an unfilled entry order after this many seconds.</summary>
     public int EntryOrderTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Extra entry filter used only for post-only orders. It rejects passive
+    /// orders that would join a thin/hostile queue instead of assuming maker
+    /// fees alone make every resting order attractive.
+    /// </summary>
+    public bool MakerQualityEnabled { get; set; } = true;
+
+    /// <summary>Minimum signed top-book imbalance in the intended direction.</summary>
+    public decimal MakerMinDirectionalImbalance { get; set; } = 0.05m;
+
+    /// <summary>Minimum quote liquidity resting at the intended best price. Zero disables.</summary>
+    public decimal MakerMinTopLevelDepthUsd { get; set; } = 100m;
+
+    /// <summary>Maximum fraction of the intended touch queue occupied by our order.</summary>
+    public decimal MakerMaxQueueFraction { get; set; } = 0.20m;
+
+    /// <summary>Refuse a passive order when its source book is older than this.</summary>
+    public int MakerMaxBookAgeMs { get; set; } = 2_500;
+
+    /// <summary>Refuse a passive order if scan-to-submit latency exceeds this.</summary>
+    public int MakerMaxSignalAgeMs { get; set; } = 2_000;
 
     /// <summary>
     /// Warn when passive entries are being cancelled too often. This is only

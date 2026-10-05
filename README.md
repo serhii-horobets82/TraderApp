@@ -158,6 +158,8 @@ It is still a limit order, so slippage is capped at the spread, and the 8 bps
 `MaxSpreadBps` veto caps that at roughly 0.08% against targets of ~0.30-2.0%.
 Set `PostOnlyEntries: true` to go back to passive resting.
 
+On Bybit, passive entries additionally use a local 50-level public WebSocket book (with REST fallback). The maker-quality gate requires sufficient touch depth, directional five-level imbalance, a bounded share of the touch queue, and fresh book/signal data. Tune or disable with `Trading.MakerQualityEnabled` and the `Trading.Maker*` settings; `Bybit.PublicOrderBookWebSocketEnabled` can disable the stream while preserving REST operation.
+
 Cooldowns and the trades-per-hour / trades-per-day budgets are consumed when an
 entry **fills**, not when it is placed - an order that times out unfilled costs
 nothing.
