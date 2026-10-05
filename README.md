@@ -232,6 +232,7 @@ The settings worth knowing:
 | `Trading.StopLossAtrMult` | `1.4` | Working stop distance |
 | `Trading.TakeProfitAtrMult` | `3.0` | Target; sized so 0.1%/0.1% fees leave net edge |
 | `Trading.PostOnlyEntries` | `false` | `false` crosses the spread to fill now; `true` rests at the near touch and may not fill |
+| `Trading.PostOnlyFillWarning*` | `5` / `40%` / `180m` | Alert when enough passive entries settle below the configured fill-rate threshold |
 | `Risk.RiskPerTradePct` | `0.25` | Percent of equity lost if the stop is hit |
 | `Risk.MaxDailyDrawdownPct` | `2` | Session-start equity cutout |
 | `Risk.MaxPeakDrawdownPct` | `2` | Drawdown from session peak (0 = off) |

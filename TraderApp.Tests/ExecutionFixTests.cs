@@ -471,6 +471,20 @@ public class EntryBlockedTests
     }
 }
 
+public class PostOnlyFillRateTests
+{
+    [Theory]
+    [InlineData(4, 0, 5, 40, false)]
+    [InlineData(5, 1, 5, 40, true)]
+    [InlineData(5, 2, 5, 40, false)]
+    [InlineData(5, 0, 0, 40, false)]
+    public void Warning_requires_enough_attempts_and_a_rate_below_the_threshold(
+        int attempts, int fills, int minAttempts, decimal minRate, bool expected)
+    {
+        Assert.Equal(expected, AutoTrader.ShouldWarnPostOnlyFillRate(attempts, fills, minAttempts, minRate));
+    }
+}
+
 public class ClosedPnlMatchingTests
 {
     private static readonly DateTime Opened = new(2026, 10, 4, 12, 45, 6, DateTimeKind.Utc);

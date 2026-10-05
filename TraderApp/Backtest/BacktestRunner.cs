@@ -190,7 +190,10 @@ public static class BacktestRunner
             ScratchMaxFavourableR = c.Trading.ScratchMaxFavourableR,
             ScratchOnlyAboveR = c.Trading.ScratchOnlyAboveR,
             PostOnlyEntries = c.Trading.PostOnlyEntries,
-            EntryOrderTimeoutSeconds = c.Trading.EntryOrderTimeoutSeconds
+            EntryOrderTimeoutSeconds = c.Trading.EntryOrderTimeoutSeconds,
+            PostOnlyFillWarningMinAttempts = c.Trading.PostOnlyFillWarningMinAttempts,
+            PostOnlyFillWarningMinRatePct = c.Trading.PostOnlyFillWarningMinRatePct,
+            PostOnlyFillWarningWindowMinutes = c.Trading.PostOnlyFillWarningWindowMinutes
         },
         Signals = new SignalConfig
         {

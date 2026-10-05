@@ -99,6 +99,9 @@ internal sealed class PendingEntry
 internal sealed record ClosedTrade(
     long PositionId, string Market, bool IsLong, DateTime ClosedUtc, string ExitReason, ManagedPosition State);
 
+/// <summary>A settled passive-entry attempt used to monitor fill quality.</summary>
+internal sealed record EntryOutcomeSample(DateTime SettledUtc, bool Filled);
+
 /// <summary>
 /// The auto-trading loop.
 ///
@@ -151,6 +154,7 @@ public sealed class AutoTrader : IAsyncDisposable
     private readonly HashSet<string> _bookedClosedPnl = new(StringComparer.Ordinal);
 
     private DateTime _entriesBlockedUntilUtc = DateTime.MinValue;
+    private DateTime _lastEntryBlockedStatusLogUtc = DateTime.MinValue;
     private bool _entryBlockNotified;
     private static readonly TimeSpan EntryBlockReprobe = TimeSpan.FromHours(6);
     /// <summary>Signal context of the most recent entry order per market, attached to the position once it fills.</summary>
@@ -159,6 +163,9 @@ public sealed class AutoTrader : IAsyncDisposable
     private bool _profitLockNotified;
     private decimal? _flatEquityRef;
     private DateTime _lastFlatEquityWarnUtc = DateTime.MinValue;
+    private readonly object _postOnlyOutcomeLock = new();
+    private readonly Queue<EntryOutcomeSample> _postOnlyOutcomes = new();
+    private DateTime _lastPostOnlyFillWarningUtc = DateTime.MinValue;
     private DateTime _lastIdleStatusUtc = DateTime.MinValue;
 
     public AutoTrader(BotConfig cfg, IExchangeClient client, Notifications.TelegramNotifier? telegram = null)
@@ -485,9 +492,11 @@ public sealed class AutoTrader : IAsyncDisposable
 
         _lastFlatEquityWarnUtc = DateTime.UtcNow;
         _flatEquityRef = equity;
-        Log.Warn($"equity moved {movePct:F2}% ({reference:F2} → {equity:F2}) with no position open — " +
-                 "collateral is not quote-only, or a position exists that the bot cannot see. " +
-                 "The drawdown/profit locks are reacting to that, not to trades.");
+        var message = $"equity moved {movePct:F2}% ({reference:F2} → {equity:F2}) with no position open — " +
+                      "collateral is not quote-only, or a position exists that the bot cannot see. " +
+                      "The drawdown/profit locks are reacting to that, not to trades.";
+        Log.Warn(message);
+        _telegram?.Send($"⚠️ {_venueLabel}: {message}");
     }
 
     private async Task RefreshMarketRulesAsync(CancellationToken ct)
@@ -743,6 +752,9 @@ public sealed class AutoTrader : IAsyncDisposable
         sb.Append($"Balance  {_lastEquity:F2} USDT ({session:+0.00;-0.00} session)\n");
         sb.Append($"Open     {real.Count}/{_cfg.Risk.MaxConcurrentPositions} · notional {notional:F2}\n");
         sb.Append($"Pending  {_pending.Count} · last tick {age}\n");
+        var (attempts, fills) = PostOnlyFillStats();
+        if (attempts > 0)
+            sb.Append($"Passive fills  {fills}/{attempts} ({fills * 100m / attempts:F0}%) · last {_cfg.Trading.PostOnlyFillWarningWindowMinutes}m\n");
         if (_risk.Halted) sb.Append($"⛔ HALTED · {_risk.HaltReason}\n");
         else if (_risk.EntriesPaused)
         {
@@ -1148,6 +1160,7 @@ public sealed class AutoTrader : IAsyncDisposable
         {
             case EntryOutcome.Filled:
                 _risk.RecordEntry(p.Market);
+                NotePostOnlyOutcome(filled: true);
                 Log.Trade($"{p.Market}: entry #{p.Label} filled" +
                           (info is { DealStock: > 0 } ? $" ({info.DealStock} of {info.Amount})" : ""));
                 if (_cfg.Telegram.SendTrades)
@@ -1156,6 +1169,7 @@ public sealed class AutoTrader : IAsyncDisposable
                 break;
 
             case EntryOutcome.NotFilled:
+                NotePostOnlyOutcome(filled: false);
                 Log.Trade($"{p.Market}: entry #{p.Label} ended without a fill ({info?.Status}) - " +
                           "no entry recorded, no cooldown consumed");
                 _pending.Remove(p);
@@ -1237,15 +1251,19 @@ public sealed class AutoTrader : IAsyncDisposable
     {
         if (DateTime.UtcNow >= _entriesBlockedUntilUtc) return false;
 
-        if (ShouldStatusLog())
+        if (DateTime.UtcNow - _lastEntryBlockedStatusLogUtc >= TimeSpan.FromMinutes(15))
+        {
+            _lastEntryBlockedStatusLogUtc = DateTime.UtcNow;
             Log.Info($"entries blocked on {_venueLabel} (account restriction) - next attempt after " +
                      $"{_entriesBlockedUntilUtc:HH:mm} UTC");
+        }
         return true;
     }
 
     private void BlockEntriesForVenue(string market, ApiException ex)
     {
         _entriesBlockedUntilUtc = DateTime.UtcNow + EntryBlockReprobe;
+        _lastEntryBlockedStatusLogUtc = DateTime.UtcNow;
 
         if (_entryBlockNotified)
         {
@@ -1270,6 +1288,42 @@ public sealed class AutoTrader : IAsyncDisposable
         Log.Info($"{_venueLabel} accepted an entry again - restriction lifted");
         _telegram?.Send($"✅ {_venueLabel} accepted an entry order again. The earlier restriction has lifted.");
     }
+
+    private void NotePostOnlyOutcome(bool filled)
+    {
+        if (!_cfg.Trading.PostOnlyEntries) return;
+
+        var now = DateTime.UtcNow;
+        lock (_postOnlyOutcomeLock)
+            _postOnlyOutcomes.Enqueue(new EntryOutcomeSample(now, filled));
+        var (attempts, fills) = PostOnlyFillStats(now);
+        if (!ShouldWarnPostOnlyFillRate(attempts, fills, _cfg.Trading.PostOnlyFillWarningMinAttempts,
+                _cfg.Trading.PostOnlyFillWarningMinRatePct))
+            return;
+        if (now - _lastPostOnlyFillWarningUtc < TimeSpan.FromHours(1)) return;
+
+        _lastPostOnlyFillWarningUtc = now;
+        var rate = fills * 100m / attempts;
+        var message = $"post-only fill rate {fills}/{attempts} ({rate:F0}%) in the last " +
+                      $"{_cfg.Trading.PostOnlyFillWarningWindowMinutes}m; below the " +
+                      $"{_cfg.Trading.PostOnlyFillWarningMinRatePct:F0}% threshold. Consider a less passive entry policy.";
+        Log.Warn(message);
+        _telegram?.Send($"⚠️ {_venueLabel}: {message}");
+    }
+
+    private (int Attempts, int Fills) PostOnlyFillStats(DateTime? nowUtc = null)
+    {
+        lock (_postOnlyOutcomeLock)
+        {
+            var cutoff = (nowUtc ?? DateTime.UtcNow).AddMinutes(-_cfg.Trading.PostOnlyFillWarningWindowMinutes);
+            while (_postOnlyOutcomes.Count > 0 && _postOnlyOutcomes.Peek().SettledUtc < cutoff)
+                _postOnlyOutcomes.Dequeue();
+            return (_postOnlyOutcomes.Count, _postOnlyOutcomes.Count(x => x.Filled));
+        }
+    }
+
+    public static bool ShouldWarnPostOnlyFillRate(int attempts, int fills, int minAttempts, decimal minRatePct) =>
+        minAttempts > 0 && attempts >= minAttempts && fills * 100m / attempts < minRatePct;
 
     // ── Position management ─────────────────────────────────────────────
 

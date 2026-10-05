@@ -105,6 +105,12 @@ public sealed class BotConfig
             errors.Add("Trading.PartialTakeFraction must be in (0, 1) when PartialTakeAtR is set.");
         if (Trading.EntryHoursUtcStart is < 0 or > 23 || Trading.EntryHoursUtcEnd is < 0 or > 24)
             errors.Add("Trading.EntryHoursUtcStart must be 0-23 and EntryHoursUtcEnd 0-24.");
+        if (Trading.PostOnlyFillWarningMinAttempts is < 0 or > 100)
+            errors.Add("Trading.PostOnlyFillWarningMinAttempts must be in [0, 100]. 0 disables the alert.");
+        if (Trading.PostOnlyFillWarningMinRatePct is < 0 or > 100)
+            errors.Add("Trading.PostOnlyFillWarningMinRatePct must be in [0, 100].");
+        if (Trading.PostOnlyFillWarningWindowMinutes is < 1 or > 1440)
+            errors.Add("Trading.PostOnlyFillWarningWindowMinutes must be between 1 and 1440.");
         if (Risk.ProfitLockRiskScale is < 0 or > 1)
             errors.Add("Risk.ProfitLockRiskScale must be in [0, 1]. 0 halts on the profit lock.");
         if (Risk.WeekendRiskScale is <= 0 or > 1)
@@ -311,6 +317,18 @@ public sealed class TradingConfig
 
     /// <summary>Cancel an unfilled entry order after this many seconds.</summary>
     public int EntryOrderTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Warn when passive entries are being cancelled too often. This is only
+    /// used when PostOnlyEntries is enabled; zero disables the alert.
+    /// </summary>
+    public int PostOnlyFillWarningMinAttempts { get; set; } = 5;
+
+    /// <summary>Minimum acceptable post-only fill rate, expressed as 0-100.</summary>
+    public decimal PostOnlyFillWarningMinRatePct { get; set; } = 40m;
+
+    /// <summary>Rolling window used by the post-only fill-rate warning.</summary>
+    public int PostOnlyFillWarningWindowMinutes { get; set; } = 180;
 
     /// <summary>
     /// Take part of the position off once the trade reaches this R (0 disables).

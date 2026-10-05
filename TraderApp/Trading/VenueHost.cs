@@ -181,6 +181,9 @@ public static class VenueHost
                 ? bybit.PostOnlyEntries.Value
                 : t.PostOnlyEntries,
             EntryOrderTimeoutSeconds = t.EntryOrderTimeoutSeconds,
+            PostOnlyFillWarningMinAttempts = t.PostOnlyFillWarningMinAttempts,
+            PostOnlyFillWarningMinRatePct = t.PostOnlyFillWarningMinRatePct,
+            PostOnlyFillWarningWindowMinutes = t.PostOnlyFillWarningWindowMinutes,
             PartialTakeAtR = t.PartialTakeAtR,
             PartialTakeFraction = t.PartialTakeFraction,
             EntryHoursUtcStart = t.EntryHoursUtcStart,
