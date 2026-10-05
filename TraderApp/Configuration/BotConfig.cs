@@ -336,6 +336,14 @@ public sealed class TradingConfig
     /// The daily Telegram digest is built from this file.
     /// </summary>
     public string TradeJournalPath { get; set; } = "data/trades.jsonl";
+
+    /// <summary>
+    /// Where per-position management state (verified opening time, stops,
+    /// high-water mark, partial-take flag) is kept so a restart resumes the
+    /// same trade instead of re-deriving it and resetting its age. Mount a
+    /// volume here to survive redeploys. Empty disables.
+    /// </summary>
+    public string PositionStatePath { get; set; } = "data/positions.json";
 }
 
 public sealed class SignalConfig
@@ -584,7 +592,11 @@ public sealed class RiskConfig
     /// <summary>Stop must also be at least this many times the round-trip fee.</summary>
     public decimal MinStopFeeMultiple { get; set; } = 2.5m;
 
-    /// <summary>Net PnL inside this band is fee noise and does not count toward the loss streak.</summary>
+    /// <summary>
+    /// Net PnL inside this band is classified as fee-sized. Such losses DO count
+    /// toward the loss streak and its cumulative total (they are reported
+    /// separately); a fee-sized win does not reset a losing streak.
+    /// </summary>
     public decimal FeeNoiseUsd { get; set; } = 0.12m;
 
     /// <summary>Close everything and halt when the account reports margin_call or liquidation state.</summary>

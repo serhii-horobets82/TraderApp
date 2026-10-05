@@ -155,7 +155,16 @@ public sealed class Position
     /// </summary>
     public decimal FloatingPnl(decimal mark) =>
         UnrealizedPnl != 0 ? UnrealizedPnl : (mark - BasePrice) * Amount;
-    public DateTime OpenedAtUtc => DateTimeOffset.FromUnixTimeMilliseconds((long)(OpenDate * 1000)).UtcDateTime;
+
+    /// <summary>
+    /// When this position was opened according to the venue, or null when the
+    /// venue did not say. A missing value must stay null: the old conversion
+    /// turned 0 into 1970-01-01, which made a fresh position look 56 years old.
+    /// </summary>
+    public DateTime? OpenedAtUtc => OpenDate > 0
+        ? DateTimeOffset.FromUnixTimeMilliseconds((long)(OpenDate * 1000)).UtcDateTime
+        : null;
+
     public bool InTrouble =>
         string.Equals(LiquidationState, "margin_call", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(LiquidationState, "liquidation", StringComparison.OrdinalIgnoreCase);
@@ -163,7 +172,13 @@ public sealed class Position
 
 public sealed class OrderResponse
 {
-    [JsonProperty("orderId")] public long OrderId { get; set; }
+    /// <summary>
+    /// Venue order id, always a string. Bybit ids are UUIDs; WhiteBIT ids are
+    /// integers that Json.NET coerces to their decimal text. An empty value
+    /// means the venue did not return an id - it must never be mapped to a
+    /// placeholder such as "0", which would match unrelated orders.
+    /// </summary>
+    [JsonProperty("orderId", NullValueHandling = NullValueHandling.Ignore)] public string OrderId { get; set; } = "";
     [JsonProperty("clientOrderId")] public string? ClientOrderId { get; set; }
     [JsonProperty("market")] public string? Market { get; set; }
     [JsonProperty("side")] public string? Side { get; set; }
@@ -200,6 +215,17 @@ public sealed class ClosedPnl
     [JsonProperty("positionId")] public long PositionId { get; set; }
     [JsonProperty("market")] public string? Market { get; set; }
 
+    /// <summary>
+    /// Id of the closing order where the venue provides one (Bybit). Together
+    /// with the timestamps it identifies one record, so the same record is
+    /// never booked for two trades.
+    /// </summary>
+    [JsonIgnore] public string OrderId { get; set; } = "";
+
+    /// <summary>Stable identity of this record, for "already booked" bookkeeping.</summary>
+    public string RecordKey =>
+        $"{PositionId}|{Market}|{OrderId}|{CloseDate}|{ClosedSize}|{NetPnl}";
+
     /// <summary>Realised PnL before funding, but after trade fees.</summary>
     [JsonProperty("grossPnl")] public decimal GrossPnl { get; set; }
 
@@ -214,6 +240,36 @@ public sealed class ClosedPnl
     [JsonProperty("side")] public string? Side { get; set; }
     [JsonProperty("openDate")] public long OpenDate { get; set; }
     [JsonProperty("closeDate")] public long CloseDate { get; set; }
+
+    /// <summary>
+    /// Sums several records that belong to one trade (a partial take plus the
+    /// final close). Prices are size-weighted; the close date is the latest.
+    /// </summary>
+    public static ClosedPnl Merge(IReadOnlyList<ClosedPnl> records)
+    {
+        if (records.Count == 1) return records[0];
+
+        var size = records.Sum(r => r.ClosedSize);
+        decimal Weighted(Func<ClosedPnl, decimal> price) =>
+            size > 0 ? records.Sum(r => price(r) * r.ClosedSize) / size : price(records[0]);
+
+        return new ClosedPnl
+        {
+            PositionId = records[0].PositionId,
+            Market = records[0].Market,
+            OrderId = string.Join(",", records.Select(r => r.OrderId).Where(o => o.Length > 0)),
+            GrossPnl = records.Sum(r => r.GrossPnl),
+            NetPnl = records.Sum(r => r.NetPnl),
+            TotalTradeFee = records.Sum(r => r.TotalTradeFee),
+            TotalFunding = records.Sum(r => r.TotalFunding),
+            AvgEntryPrice = Weighted(r => r.AvgEntryPrice),
+            AvgExitPrice = Weighted(r => r.AvgExitPrice),
+            ClosedSize = size,
+            Side = records[0].Side,
+            OpenDate = records.Select(r => r.OpenDate).Where(d => d > 0).DefaultIfEmpty(0).Min(),
+            CloseDate = records.Max(r => r.CloseDate)
+        };
+    }
 
     /// <summary>How long the position was actually held.</summary>
     public TimeSpan Held => OpenDate > 0 && CloseDate > OpenDate

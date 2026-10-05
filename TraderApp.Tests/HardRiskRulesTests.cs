@@ -80,11 +80,11 @@ public class HardRiskRulesTests
     }
 
     [Fact]
-    public void Fee_noise_does_not_count_toward_loss_streak()
+    public void Fee_sized_losses_count_toward_the_loss_streak_and_halt()
     {
         var rm = Create(c =>
         {
-            c.MaxConsecutiveLosses = 2;
+            c.MaxConsecutiveLosses = 3;
             c.HaltOnConsecutiveLosses = true;
             c.FeeNoiseUsd = 0.12m;
         });
@@ -92,7 +92,96 @@ public class HardRiskRulesTests
         rm.RecordTradeResult(false, -0.05m);
         rm.RecordTradeResult(false, -0.05m);
         Assert.False(rm.Halted);
+        Assert.Equal(2, rm.ConsecutiveLosses);
+        Assert.Equal(2, rm.ConsecutiveSmallLosses);
+        Assert.Equal(0.10m, rm.LossStreakUsd);
+
+        rm.RecordTradeResult(false, -0.05m);
+        Assert.True(rm.Halted);
+        Assert.Contains("consecutive losses", rm.HaltReason);
+        Assert.Contains("3 fee-sized", rm.HaltReason);
+    }
+
+    [Fact]
+    public void Small_and_large_losses_share_one_streak_and_one_total()
+    {
+        var rm = Create(c => { c.MaxConsecutiveLosses = 10; c.FeeNoiseUsd = 0.12m; });
+
+        rm.RecordTradeResult(false, -0.05m);
+        rm.RecordTradeResult(false, -0.80m);
+        rm.RecordTradeResult(false, -0.02m);
+
+        Assert.Equal(3, rm.ConsecutiveLosses);
+        Assert.Equal(2, rm.ConsecutiveSmallLosses);
+        Assert.Equal(0.87m, rm.LossStreakUsd);
+    }
+
+    [Fact]
+    public void Fee_sized_win_does_not_reset_a_losing_streak_but_a_real_win_does()
+    {
+        var rm = Create(c => { c.MaxConsecutiveLosses = 10; c.FeeNoiseUsd = 0.12m; });
+
+        rm.RecordTradeResult(false, -0.30m);
+        rm.RecordTradeResult(false, -0.05m);
+        rm.RecordTradeResult(true, 0.04m);
+        Assert.Equal(2, rm.ConsecutiveLosses);
+
+        rm.RecordTradeResult(true, 0.50m);
         Assert.Equal(0, rm.ConsecutiveLosses);
+        Assert.Equal(0, rm.ConsecutiveSmallLosses);
+        Assert.Equal(0m, rm.LossStreakUsd);
+    }
+
+    [Fact]
+    public void A_trade_that_netted_exactly_zero_is_ignored()
+    {
+        var rm = Create();
+        rm.RecordTradeResult(false, 0m);
+        Assert.Equal(0, rm.ConsecutiveLosses);
+    }
+
+    [Fact]
+    public void The_recorded_journal_pattern_of_54_fee_sized_losses_trips_the_halt()
+    {
+        var rm = Create(c =>
+        {
+            c.MaxConsecutiveLosses = 10;
+            c.HaltOnConsecutiveLosses = true;
+            c.FeeNoiseUsd = 0.12m;
+        });
+
+        for (var i = 0; i < 54 && !rm.Halted; i++)
+            rm.RecordTradeResult(false, -0.0315m);
+
+        Assert.True(rm.Halted);
+        Assert.Equal(10, rm.ConsecutiveLosses);
+    }
+
+    [Fact]
+    public void Small_loss_counters_survive_a_restart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"risk-small-{Guid.NewGuid():N}.json");
+        try
+        {
+            RiskConfig Cfg() => new()
+            {
+                PersistSessionState = true, SessionStatePath = path,
+                MaxConsecutiveLosses = 10, FeeNoiseUsd = 0.12m
+            };
+
+            var first = new RiskManager(Cfg(), new TradingConfig());
+            first.RestoreOrInitialise(1_000m);
+            first.RecordTradeResult(false, -0.05m);
+            first.RecordTradeResult(false, -0.40m);
+
+            var second = new RiskManager(Cfg(), new TradingConfig());
+            second.RestoreOrInitialise(1_000m);
+
+            Assert.Equal(2, second.ConsecutiveLosses);
+            Assert.Equal(1, second.ConsecutiveSmallLosses);
+            Assert.Equal(0.45m, second.LossStreakUsd);
+        }
+        finally { File.Delete(path); }
     }
 
     [Fact]
