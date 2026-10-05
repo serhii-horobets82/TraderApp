@@ -93,6 +93,10 @@ public sealed class BotConfig
             errors.Add("Risk.MaxTradesPerDay must be between 1 and 200.");
         if (Risk.MaxConsecutiveLosses is < 1 or > 20)
             errors.Add("Risk.MaxConsecutiveLosses must be between 1 and 20.");
+        if (Risk.MaxConsecutiveLossesPerMarket is < 0 or > 20)
+            errors.Add("Risk.MaxConsecutiveLossesPerMarket must be in [0, 20]. 0 disables the per-market brake.");
+        if (Risk.MarketLossCooldownMinutes is < 1 or > 1440)
+            errors.Add("Risk.MarketLossCooldownMinutes must be between 1 and 1440.");
         if (Signals.MinScore is < 0.3 or > 1.0)
             errors.Add("Signals.MinScore must be in [0.3, 1.0].");
         if (Signals.MinDirectionEdge is < 0 or > 1.0)
@@ -586,6 +590,16 @@ public sealed class RiskConfig
 
     /// <summary>Cooldown after the consecutive-loss limit is hit, in minutes (used when HaltOnConsecutiveLosses is false).</summary>
     public int LossCooldownMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// Pause only one symbol after this many consecutive realised losses. This
+    /// limits a market-specific regime failure without stopping protection for
+    /// positions or disabling unrelated symbols. Zero disables the brake.
+    /// </summary>
+    public int MaxConsecutiveLossesPerMarket { get; set; } = 3;
+
+    /// <summary>How long a symbol stays closed after its per-market loss brake triggers.</summary>
+    public int MarketLossCooldownMinutes { get; set; } = 360;
 
     /// <summary>Minimum wait between two entries on the same market, in seconds.</summary>
     public int PerMarketCooldownSeconds { get; set; } = 300;

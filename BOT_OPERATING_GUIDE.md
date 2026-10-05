@@ -60,6 +60,10 @@ RiskManager is separate from signal generation and applies:
 - Optional daily-profit risk reduction or lock.
 - Consecutive-loss halt/cooldown and margin-call detection.
 
+There is also a per-market loss brake. By default, three consecutive realised
+losses on one symbol stop new entries on that symbol for six hours, while exits
+and other markets continue to operate. The brake is persisted across redeploys.
+
 Risk state persists on disk. `ClearHaltOnBoot=true` is now one-shot: it performs one deliberate reset, records that fact, and cannot wipe hard halts after every Railway restart. Toggle it false, then true, for another intentional reset.
 
 ## Logs, journal and Telegram

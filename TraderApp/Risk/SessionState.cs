@@ -20,6 +20,12 @@ public sealed class SessionState
     public DateTime? HaltedAtUtc { get; set; }
     public int ConsecutiveLosses { get; set; }
 
+    /// <summary>Realised consecutive-loss counters per market.</summary>
+    public Dictionary<string, int> ConsecutiveLossesByMarket { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Per-market entry brakes, persisted so a redeploy cannot bypass them.</summary>
+    public Dictionary<string, DateTime> MarketLossCooldownUntilUtc { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>How many of ConsecutiveLosses were fee-sized (reporting only; they count toward the streak).</summary>
     public int ConsecutiveSmallLosses { get; set; }
 

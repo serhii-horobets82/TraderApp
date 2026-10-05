@@ -103,6 +103,27 @@ public class HardRiskRulesTests
     }
 
     [Fact]
+    public void Per_market_loss_brake_pauses_only_the_losing_symbol()
+    {
+        var rm = Create(c =>
+        {
+            c.MaxConsecutiveLosses = 10;
+            c.MaxConsecutiveLossesPerMarket = 2;
+            c.MarketLossCooldownMinutes = 60;
+            c.PerMarketCooldownSeconds = 0;
+        });
+
+        Assert.Null(rm.RecordTradeResult(false, -0.30m, "SOL_USDT"));
+        var message = rm.RecordTradeResult(false, -0.20m, "SOL_USDT");
+
+        Assert.NotNull(message);
+        Assert.Contains("SOL_USDT", message);
+        Assert.False(rm.CanOpenNewPosition("SOL_USDT", Array.Empty<Position>(), out var reason));
+        Assert.Contains("loss brake", reason);
+        Assert.True(rm.CanOpenNewPosition("AAVE_USDT", Array.Empty<Position>(), out _));
+    }
+
+    [Fact]
     public void Small_and_large_losses_share_one_streak_and_one_total()
     {
         var rm = Create(c => { c.MaxConsecutiveLosses = 10; c.FeeNoiseUsd = 0.12m; });

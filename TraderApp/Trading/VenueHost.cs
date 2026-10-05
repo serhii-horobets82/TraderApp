@@ -120,6 +120,8 @@ public static class VenueHost
             MaxConsecutiveLosses = r.MaxConsecutiveLosses,
             HaltOnConsecutiveLosses = r.HaltOnConsecutiveLosses,
             LossCooldownMinutes = r.LossCooldownMinutes,
+            MaxConsecutiveLossesPerMarket = r.MaxConsecutiveLossesPerMarket,
+            MarketLossCooldownMinutes = r.MarketLossCooldownMinutes,
             PerMarketCooldownSeconds = r.PerMarketCooldownSeconds,
             MaxTradesPerHour = r.MaxTradesPerHour,
             MaxTradesPerDay = r.MaxTradesPerDay,

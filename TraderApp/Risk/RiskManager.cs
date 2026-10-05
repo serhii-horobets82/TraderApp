@@ -19,6 +19,8 @@ public sealed class RiskManager
     private readonly SessionStateStore _store;
 
     private readonly Dictionary<string, DateTime> _lastEntryPerMarket = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _consecutiveLossesByMarket = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTime> _marketLossCooldownUntil = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<DateTime> _entryTimestamps = new();
 
     private int _consecutiveLosses;
@@ -150,6 +152,10 @@ public sealed class RiskManager
             _entriesDay = day;
 
         _consecutiveLosses = Math.Max(0, saved.ConsecutiveLosses);
+        foreach (var kv in saved.ConsecutiveLossesByMarket.Where(kv => !string.IsNullOrWhiteSpace(kv.Key) && kv.Value > 0))
+            _consecutiveLossesByMarket[kv.Key] = kv.Value;
+        foreach (var kv in saved.MarketLossCooldownUntilUtc.Where(kv => !string.IsNullOrWhiteSpace(kv.Key) && kv.Value > DateTime.UtcNow))
+            _marketLossCooldownUntil[kv.Key] = kv.Value;
         _consecutiveSmallLosses = Math.Clamp(saved.ConsecutiveSmallLosses, 0, _consecutiveLosses);
         _lossStreakUsd = Math.Max(0m, saved.LossStreakUsd);
         _entriesToday = Math.Max(0, saved.EntriesToday);
@@ -355,31 +361,51 @@ public sealed class RiskManager
     /// losing run standing. A trade that netted exactly zero carries no
     /// information and is ignored.
     /// </summary>
-    public void RecordTradeResult(bool profitable, decimal? netPnl = null)
+    /// <returns>A market-specific brake message when one was applied; otherwise null.</returns>
+    public string? RecordTradeResult(bool profitable, decimal? netPnl = null, string? market = null)
     {
-        if (netPnl == 0m) return;
+        if (netPnl == 0m) return null;
 
         var feeSized = netPnl is { } n && Math.Abs(n) <= _cfg.FeeNoiseUsd;
 
         if (profitable)
         {
-            if (feeSized) return;
+            if (feeSized) return null;
 
             _consecutiveLosses = 0;
             _consecutiveSmallLosses = 0;
             _lossStreakUsd = 0m;
+            if (!string.IsNullOrWhiteSpace(market)) _consecutiveLossesByMarket.Remove(market);
             Persist();
-            return;
+            return null;
         }
 
         _consecutiveLosses++;
         if (feeSized) _consecutiveSmallLosses++;
         if (netPnl is { } loss && loss < 0m) _lossStreakUsd += -loss;
 
+        string? marketBrake = null;
+        if (!string.IsNullOrWhiteSpace(market) && _cfg.MaxConsecutiveLossesPerMarket > 0)
+        {
+            var streak = _consecutiveLossesByMarket.GetValueOrDefault(market) + 1;
+            if (streak >= _cfg.MaxConsecutiveLossesPerMarket)
+            {
+                var until = DateTime.UtcNow.AddMinutes(_cfg.MarketLossCooldownMinutes);
+                _marketLossCooldownUntil[market] = until;
+                _consecutiveLossesByMarket.Remove(market);
+                marketBrake = $"{market}: {streak} consecutive realised losses — entry brake until {until:HH:mm} UTC";
+                Log.Risk(marketBrake);
+            }
+            else
+            {
+                _consecutiveLossesByMarket[market] = streak;
+            }
+        }
+
         if (_consecutiveLosses < _cfg.MaxConsecutiveLosses)
         {
             Persist();
-            return;
+            return marketBrake;
         }
 
         if (_cfg.HaltOnConsecutiveLosses)
@@ -387,7 +413,7 @@ public sealed class RiskManager
             Halt($"{_consecutiveLosses} consecutive losses ({_consecutiveSmallLosses} fee-sized, " +
                  $"{_lossStreakUsd:0.00} USDT total) — hard session halt " +
                  $"(limit {_cfg.MaxConsecutiveLosses})", HaltKind.ConsecutiveLosses);
-            return;
+            return marketBrake;
         }
 
         _cooldownUntil = DateTime.UtcNow.AddMinutes(_cfg.LossCooldownMinutes);
@@ -395,6 +421,7 @@ public sealed class RiskManager
         _consecutiveSmallLosses = 0;
         _lossStreakUsd = 0m;
         Persist();
+        return marketBrake;
     }
 
     public void RecordEntry(string market)
@@ -433,6 +460,17 @@ public sealed class RiskManager
         {
             reason = $"loss cooldown until {until:HH:mm:ss} UTC";
             return false;
+        }
+
+        if (_marketLossCooldownUntil.TryGetValue(market, out var marketUntil))
+        {
+            if (now < marketUntil)
+            {
+                reason = $"{market} loss brake until {marketUntil:HH:mm:ss} UTC";
+                return false;
+            }
+            _marketLossCooldownUntil.Remove(market);
+            Persist();
         }
 
         var used = positions.Count + reservedSlots;
@@ -652,6 +690,8 @@ public sealed class RiskManager
             HaltKind = _haltKind.ToString(),
             HaltedAtUtc = _haltedAtUtc,
             ConsecutiveLosses = _consecutiveLosses,
+            ConsecutiveLossesByMarket = new Dictionary<string, int>(_consecutiveLossesByMarket, StringComparer.OrdinalIgnoreCase),
+            MarketLossCooldownUntilUtc = new Dictionary<string, DateTime>(_marketLossCooldownUntil, StringComparer.OrdinalIgnoreCase),
             ConsecutiveSmallLosses = _consecutiveSmallLosses,
             LossStreakUsd = _lossStreakUsd,
             EntriesToday = _entriesToday,

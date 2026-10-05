@@ -1493,13 +1493,16 @@ public sealed class AutoTrader : IAsyncDisposable
             var notional = rec.AvgEntryPrice * rec.ClosedSize;
             var pct = notional > 0 ? rec.NetPnl / notional * 100m : 0m;
 
-            _risk.RecordTradeResult(profitable: rec.NetPnl > 0, netPnl: rec.NetPnl);
+            var marketBrake = _risk.RecordTradeResult(profitable: rec.NetPnl > 0, netPnl: rec.NetPnl, market: t.Market);
             Log.Trade($"{t.Market} #{t.PositionId} closed: net {rec.NetPnl:+0.0000;-0.0000} USDT " +
                       $"({pct:+0.00;-0.00}%), fees {rec.TotalTradeFee:F4}, funding {rec.TotalFunding:F4}" +
                       (matched.Count > 1 ? $" [{matched.Count} records]" : ""));
 
             var record = BuildRecord(t, rec, pct);
             _journal.Append(record);
+
+            if (marketBrake is not null)
+                _telegram?.Send($"⚠️ {_venueLabel}: {marketBrake}");
 
             if (_cfg.Telegram.SendTrades)
                 _telegram?.Send(FormatClose(t, rec, pct, equity, TimeSpan.FromMinutes(record.HeldMinutes)));
