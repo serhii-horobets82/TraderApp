@@ -84,6 +84,14 @@ internal sealed class PendingEntry
     public int CancelFailures { get; set; }
     public DateTime? NextCancelUtc { get; set; }
 
+    /// <summary>
+    /// A cancel acknowledgement is not a terminal outcome: both venues apply
+    /// cancellation asynchronously and a final partial fill may arrive after
+    /// the acknowledgement. Keep the order tracked until its final state is
+    /// observed instead of releasing the slot prematurely.
+    /// </summary>
+    public DateTime? CancelRequestedUtc { get; set; }
+
     /// <summary>First tick the order was absent from the open book, while its outcome is still unconfirmed.</summary>
     public DateTime? MissingSinceUtc { get; set; }
 
@@ -976,7 +984,14 @@ public sealed class AutoTrader : IAsyncDisposable
 
         var conviction = RiskManager.ConvictionScale(
             signal.Score, _cfg.Signals.MinScore, _cfg.Risk.ConvictionRiskFloor);
-        var sizing = _risk.Size(isLong, entryPrice, signal.Atr, equity, openNotional, rules, conviction);
+        // A crossing limit immediately pays the whole bid/ask spread.  It is
+        // a real execution cost on top of fees, not merely a display metric.
+        // A passive entry can fill at the near touch, so it does not incur it.
+        var crossingSpreadPct = _cfg.Trading.PostOnlyEntries
+            ? 0m
+            : (book.SpreadBps ?? 0m) / 100m;
+        var sizing = _risk.Size(isLong, entryPrice, signal.Atr, equity, openNotional, rules,
+            conviction, crossingSpreadPct);
         if (!sizing.Allowed)
         {
             if (ShouldLogSizingReject(market))
@@ -1088,6 +1103,15 @@ public sealed class AutoTrader : IAsyncDisposable
             if (string.IsNullOrEmpty(p.OrderId) && !string.IsNullOrEmpty(still.OrderId))
                 p.OrderId = still.OrderId;
 
+            // Acknowledged cancels can remain visible briefly. Do not issue a
+            // second cancel until the venue has had time to settle it; if it
+            // remains open after the grace window, the normal retry path below
+            // takes over.
+            if (p.CancelRequestedUtc is { } cancelRequested &&
+                DateTime.UtcNow - cancelRequested < EntryOutcomeGrace)
+                continue;
+            p.CancelRequestedUtc = null;
+
             if (DateTime.UtcNow - p.PlacedUtc <= timeout) continue;
             if (p.NextCancelUtc is { } next && DateTime.UtcNow < next) continue;
 
@@ -1095,8 +1119,9 @@ public sealed class AutoTrader : IAsyncDisposable
             {
                 await _client.CancelOrderAsync(p.Market, p.OrderId, ct);
                 Log.Trade($"{p.Market}: entry #{p.Label} not filled within {timeout.TotalSeconds:F0}s - " +
-                          "cancelled (no cooldown consumed)");
-                _pending.Remove(p);
+                          "cancel requested; awaiting final fill state");
+                p.CancelRequestedUtc = DateTime.UtcNow;
+                p.NextCancelUtc = p.CancelRequestedUtc.Value + EntryOutcomeGrace;
             }
             catch (ApiException ex) when (IsOrderAlreadyGone(ex))
             {

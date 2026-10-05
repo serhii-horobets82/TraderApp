@@ -142,6 +142,21 @@ public class SoftRiskRulesTests
     }
 
     [Fact]
+    public void Crossing_spread_is_charged_to_the_entry_edge_gate()
+    {
+        var rm = Create(r => { r.MinNetEdgePct = 0.10m; r.MinStopPct = 0.01m; r.MinStopFeeMultiple = 0m; },
+            t => { t.StopLossAtrMult = 1m; t.TakeProfitAtrMult = 1m; });
+        var rules = Rules(); // 0.2% round-trip fee
+
+        // Target = 0.35%. It clears fees + 0.10% edge (0.30%), but must fail
+        // after a 0.10% spread is included (required = 0.40%).
+        var result = rm.Size(true, 100m, 0.35m, 10_000m, 0m, rules, entrySpreadPct: 0.10m);
+
+        Assert.False(result.Allowed);
+        Assert.Contains("entry spread 0.100%", result.Reason);
+    }
+
+    [Fact]
     public void Journal_round_trips_and_digest_reports_fee_share()
     {
         var path = Path.Combine(Path.GetTempPath(), $"trades-{Guid.NewGuid():N}.jsonl");

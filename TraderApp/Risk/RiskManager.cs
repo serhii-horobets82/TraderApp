@@ -30,6 +30,7 @@ public sealed class RiskManager
     private DateTime? _haltedAtUtc;
     private HaltKind _haltKind;
     private DateOnly? _profitLockedDay;
+    private bool _clearHaltOnBootConsumed;
 
     public decimal SessionStartEquity { get; private set; }
 
@@ -119,20 +120,30 @@ public sealed class RiskManager
     /// </summary>
     public void RestoreOrInitialise(decimal equity)
     {
-        if (_cfg.ClearHaltOnBoot)
+        // ClearHaltOnBoot is intentionally one-shot. Railway environment
+        // variables persist across deploys, so treating `true` as "clear on
+        // every process start" silently bypasses hard loss halts. Operators
+        // who need another deliberate reset must toggle it false, then true.
+        var saved = _store.TryLoad();
+        if (_cfg.ClearHaltOnBoot && saved?.ClearHaltOnBootConsumed != true)
         {
             _store.Clear();
-            Log.Risk("ClearHaltOnBoot=true — discarded persisted session state");
+            _clearHaltOnBootConsumed = true;
+            Log.Risk("ClearHaltOnBoot=true — one-time reset of persisted session state");
             InitialiseEquity(equity);
             return;
         }
 
-        var saved = _store.TryLoad();
+        if (_cfg.ClearHaltOnBoot && saved?.ClearHaltOnBootConsumed == true)
+            Log.Risk("ClearHaltOnBoot=true was already consumed; restoring risk state. Toggle it false then true for another deliberate reset.");
+
         if (saved is null)
         {
             InitialiseEquity(equity);
             return;
         }
+
+        _clearHaltOnBootConsumed = saved.ClearHaltOnBootConsumed;
 
         if (!string.IsNullOrEmpty(saved.EntriesDay) &&
             DateOnly.TryParse(saved.EntriesDay, out var day))
@@ -497,7 +508,8 @@ public sealed class RiskManager
         decimal equity,
         decimal openNotional,
         MarketRules rules,
-        decimal convictionScale = 1m)
+        decimal convictionScale = 1m,
+        decimal entrySpreadPct = 0m)
     {
         if (entryPrice <= 0 || atr <= 0 || equity <= 0)
             return new SizingResult(false, 0, 0, 0, 0, "invalid inputs for sizing");
@@ -508,17 +520,18 @@ public sealed class RiskManager
             return new SizingResult(false, 0, 0, 0, 0, "zero stop distance");
 
         // Reject setups whose target cannot pay for the round trip. The fee comes
-        // from the market itself, not from a guess: on the majors WhiteBIT quotes
-        // 0.1% maker and 0.1% taker, so a 0.2% round trip - which is more than a
-        // naive "close at +0.4% PnL" scalp nets in the first place.
+        // from the market itself, not from a guess. A crossing entry also pays
+        // the bid/ask spread, so its minimum target includes that cost rather
+        // than treating a 12bp spread as free alpha.
         var roundTripFee = RoundTripFeePct(rules);
         var takePct = takeDistance / entryPrice * 100m;
         var stopPct = stopDistance / entryPrice * 100m;
-        var required = roundTripFee + _cfg.MinNetEdgePct;
+        var spreadCost = Math.Max(0m, entrySpreadPct);
+        var required = roundTripFee + spreadCost + _cfg.MinNetEdgePct;
         if (takePct < required)
             return new SizingResult(false, 0, 0, 0, 0,
-                $"target {takePct:F3}% below fee-adjusted minimum {required:F3}% " +
-                $"(round-trip fee {roundTripFee:F3}% + edge {_cfg.MinNetEdgePct:F3}%)");
+                $"target {takePct:F3}% below cost-adjusted minimum {required:F3}% " +
+                $"(round-trip fee {roundTripFee:F3}% + entry spread {spreadCost:F3}% + edge {_cfg.MinNetEdgePct:F3}%)");
 
         var minStop = Math.Max(_cfg.MinStopPct, roundTripFee * _cfg.MinStopFeeMultiple);
         if (stopPct < minStop)
@@ -633,6 +646,7 @@ public sealed class RiskManager
     {
         _store.Save(new SessionState
         {
+            ClearHaltOnBootConsumed = _clearHaltOnBootConsumed,
             Halted = Halted,
             HaltReason = HaltReason,
             HaltKind = _haltKind.ToString(),

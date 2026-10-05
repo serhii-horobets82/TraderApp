@@ -313,6 +313,40 @@ public class HardRiskRulesTests
     }
 
     [Fact]
+    public void ClearHaltOnBoot_is_consumed_after_one_restart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"risk-{Guid.NewGuid():N}.json");
+        try
+        {
+            var cfg = new RiskConfig
+            {
+                PersistSessionState = true,
+                SessionStatePath = path,
+                ClearHaltOnBoot = true,
+                MaxPeakDrawdownPct = 0m,
+                MaxDailyDrawdownPct = 50m
+            };
+
+            // First boot consumes the reset switch and writes its marker.
+            var first = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            first.RestoreOrInitialise(100m);
+            first.Halt("manual safety stop", HaltKind.MarginCall);
+
+            // A container restart with the unchanged environment must retain
+            // the hard halt rather than silently reset it again.
+            var second = new RiskManager(cfg, new TradingConfig(), new SessionStateStore(cfg));
+            second.RestoreOrInitialise(100m);
+
+            Assert.True(second.Halted);
+            Assert.Equal("manual safety stop", second.HaltReason);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void Daily_profit_lock_auto_clears_on_utc_day_roll()
     {
         var dir = Path.Combine(Path.GetTempPath(), "traderapp-test-" + Guid.NewGuid().ToString("N"));

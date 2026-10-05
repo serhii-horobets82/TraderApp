@@ -7,6 +7,13 @@ namespace TraderApp.Risk;
 /// </summary>
 public sealed class SessionState
 {
+    /// <summary>
+    /// A one-shot ClearHaltOnBoot request has already been honoured for this
+    /// persisted state. This prevents a forgotten environment variable from
+    /// erasing every later restart's risk counters and hard halts.
+    /// </summary>
+    public bool ClearHaltOnBootConsumed { get; set; }
+
     public bool Halted { get; set; }
     public string HaltReason { get; set; } = "";
     public string HaltKind { get; set; } = "";
