@@ -22,6 +22,8 @@ public sealed class RiskManager
     private readonly Queue<DateTime> _entryTimestamps = new();
 
     private int _consecutiveLosses;
+    private int _consecutiveSmallLosses;
+    private decimal _lossStreakUsd;
     private int _entriesToday;
     private DateOnly _entriesDay;
     private DateTime? _cooldownUntil;
@@ -81,6 +83,12 @@ public sealed class RiskManager
     }
     public decimal PeakEquity { get; private set; }
     public int ConsecutiveLosses => _consecutiveLosses;
+
+    /// <summary>Of the current streak, how many losses were within FeeNoiseUsd. Included in <see cref="ConsecutiveLosses"/>.</summary>
+    public int ConsecutiveSmallLosses => _consecutiveSmallLosses;
+
+    /// <summary>Total realised loss of the current streak, small losses included.</summary>
+    public decimal LossStreakUsd => _lossStreakUsd;
     public int EntriesToday => _entriesToday;
     public bool Halted { get; private set; }
 
@@ -131,6 +139,8 @@ public sealed class RiskManager
             _entriesDay = day;
 
         _consecutiveLosses = Math.Max(0, saved.ConsecutiveLosses);
+        _consecutiveSmallLosses = Math.Clamp(saved.ConsecutiveSmallLosses, 0, _consecutiveLosses);
+        _lossStreakUsd = Math.Max(0m, saved.LossStreakUsd);
         _entriesToday = Math.Max(0, saved.EntriesToday);
 
         if (saved.CooldownUntilUtc is { } until && until > DateTime.UtcNow)
@@ -322,19 +332,39 @@ public sealed class RiskManager
         return false;
     }
 
+    /// <summary>
+    /// Books one closed trade into the loss controls.
+    ///
+    /// Every loss counts toward the streak, including those inside the
+    /// FeeNoiseUsd band. Excluding them made the streak read 0 across 54
+    /// consecutive losing trades: each was "just fees", yet together they were
+    /// the whole drawdown. The band now only classifies - small losses are
+    /// tracked separately for reporting - and decides what does NOT reset the
+    /// streak: a fee-sized win proves nothing about the edge, so it leaves a
+    /// losing run standing. A trade that netted exactly zero carries no
+    /// information and is ignored.
+    /// </summary>
     public void RecordTradeResult(bool profitable, decimal? netPnl = null)
     {
-        if (netPnl is { } n && Math.Abs(n) <= _cfg.FeeNoiseUsd)
-            return;
+        if (netPnl == 0m) return;
+
+        var feeSized = netPnl is { } n && Math.Abs(n) <= _cfg.FeeNoiseUsd;
 
         if (profitable)
         {
+            if (feeSized) return;
+
             _consecutiveLosses = 0;
+            _consecutiveSmallLosses = 0;
+            _lossStreakUsd = 0m;
             Persist();
             return;
         }
 
         _consecutiveLosses++;
+        if (feeSized) _consecutiveSmallLosses++;
+        if (netPnl is { } loss && loss < 0m) _lossStreakUsd += -loss;
+
         if (_consecutiveLosses < _cfg.MaxConsecutiveLosses)
         {
             Persist();
@@ -343,13 +373,16 @@ public sealed class RiskManager
 
         if (_cfg.HaltOnConsecutiveLosses)
         {
-            Halt($"{_consecutiveLosses} consecutive losses — hard session halt " +
+            Halt($"{_consecutiveLosses} consecutive losses ({_consecutiveSmallLosses} fee-sized, " +
+                 $"{_lossStreakUsd:0.00} USDT total) — hard session halt " +
                  $"(limit {_cfg.MaxConsecutiveLosses})", HaltKind.ConsecutiveLosses);
             return;
         }
 
         _cooldownUntil = DateTime.UtcNow.AddMinutes(_cfg.LossCooldownMinutes);
         _consecutiveLosses = 0;
+        _consecutiveSmallLosses = 0;
+        _lossStreakUsd = 0m;
         Persist();
     }
 
@@ -605,6 +638,8 @@ public sealed class RiskManager
             HaltKind = _haltKind.ToString(),
             HaltedAtUtc = _haltedAtUtc,
             ConsecutiveLosses = _consecutiveLosses,
+            ConsecutiveSmallLosses = _consecutiveSmallLosses,
+            LossStreakUsd = _lossStreakUsd,
             EntriesToday = _entriesToday,
             EntriesDay = _entriesDay.ToString("yyyy-MM-dd"),
             SessionStartEquity = SessionStartEquity,

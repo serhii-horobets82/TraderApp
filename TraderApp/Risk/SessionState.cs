@@ -12,6 +12,12 @@ public sealed class SessionState
     public string HaltKind { get; set; } = "";
     public DateTime? HaltedAtUtc { get; set; }
     public int ConsecutiveLosses { get; set; }
+
+    /// <summary>How many of ConsecutiveLosses were fee-sized (reporting only; they count toward the streak).</summary>
+    public int ConsecutiveSmallLosses { get; set; }
+
+    /// <summary>Realised loss accumulated across the current losing streak, in quote currency.</summary>
+    public decimal LossStreakUsd { get; set; }
     public int EntriesToday { get; set; }
     public string EntriesDay { get; set; } = "";
     public decimal SessionStartEquity { get; set; }
