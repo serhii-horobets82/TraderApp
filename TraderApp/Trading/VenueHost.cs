@@ -129,6 +129,8 @@ public static class VenueHost
             MinStopFeeMultiple = r.MinStopFeeMultiple,
             FeeNoiseUsd = r.FeeNoiseUsd,
             FlattenOnMarginCall = r.FlattenOnMarginCall,
+            ExcludeNonQuoteCollateralFromRiskEquity = r.ExcludeNonQuoteCollateralFromRiskEquity,
+            CollateralValuationRefreshSeconds = r.CollateralValuationRefreshSeconds,
             PersistSessionState = r.PersistSessionState,
             SessionStatePath = path,
             ClearHaltOnBoot = r.ClearHaltOnBoot

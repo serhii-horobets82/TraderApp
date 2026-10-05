@@ -171,6 +171,11 @@ public sealed class AutoTrader : IAsyncDisposable
     private bool _profitLockNotified;
     private decimal? _flatEquityRef;
     private DateTime _lastFlatEquityWarnUtc = DateTime.MinValue;
+    private DateTime _collateralValuationValidUntilUtc = DateTime.MinValue;
+    private decimal _excludedCollateralUsd;
+    private bool _usingQuoteAdjustedRiskEquity;
+    private string _excludedCollateralDescription = "";
+    private string _lastCollateralNotice = "";
     private readonly object _postOnlyOutcomeLock = new();
     private readonly Queue<EntryOutcomeSample> _postOnlyOutcomes = new();
     private DateTime _lastPostOnlyFillWarningUtc = DateTime.MinValue;
@@ -281,7 +286,7 @@ public sealed class AutoTrader : IAsyncDisposable
             try
             {
                 var summary = await _client.GetAccountSummaryAsync(ct);
-                var equity = summary?.Equity ?? 0m;
+                var equity = await RiskEquityAsync(summary?.Equity ?? 0m, ct);
                 MaybeSendDailyDigest(equity);
                 if (_risk.TickUtcDay(equity))
                 {
@@ -337,11 +342,12 @@ public sealed class AutoTrader : IAsyncDisposable
         }
 
         await ApplyAccountFeesAsync(ct);
-        await CheckCollateralDenominationAsync(ct);
-
-        var equity = summary?.Equity ?? 0m;
+        var grossEquity = summary?.Equity ?? 0m;
+        var equity = await RiskEquityAsync(grossEquity, ct);
         _risk.RestoreOrInitialise(equity);
-        Log.Info($"equity {equity:F2} | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
+        Log.Info($"risk equity {equity:F2}" +
+                 (_usingQuoteAdjustedRiskEquity ? $" (account {grossEquity:F2}, excluded collateral {_excludedCollateralUsd:F2})" : "") +
+                 $" | margin {summary?.Margin:F2} | free {summary?.FreeMargin:F2} | leverage {summary?.Leverage}x");
 
         if (_risk.Halted)
         {
@@ -424,12 +430,6 @@ public sealed class AutoTrader : IAsyncDisposable
     }
 
     /// <summary>
-    /// The drawdown / profit locks read collateral equity. If the collateral
-    /// holds anything but the quote currency, its price moves are counted as
-    /// trading PnL: a BTC dip can halt the bot with no trade taken, and a
-    /// rally can trip the profit lock. Say so loudly at boot.
-    /// </summary>
-    /// <summary>
     /// Quote currency of a market symbol, for either venue's naming.
     ///
     /// WhiteBIT separates with an underscore (SOL_USDT); Bybit does not
@@ -449,31 +449,106 @@ public sealed class AutoTrader : IAsyncDisposable
         return market;
     }
 
-    private async Task CheckCollateralDenominationAsync(CancellationToken ct)
+    private sealed record ForeignCollateralValue(string Asset, decimal Amount, decimal ValueUsd, bool Priced);
+
+    /// <summary>
+    /// Values non-quote collateral with public mid prices and removes it from
+    /// the equity used by the strategy. The exchange still sees the complete
+    /// cross-margin account; this only makes the bot's own PnL locks and
+    /// position sizing reflect its USDT strategy rather than the ETH/BTC wallet.
+    /// </summary>
+    private async Task<decimal> RiskEquityAsync(decimal accountEquity, CancellationToken ct)
     {
+        if (!_cfg.Risk.ExcludeNonQuoteCollateralFromRiskEquity || accountEquity <= 0)
+            return accountEquity;
+        if (DateTime.UtcNow < _collateralValuationValidUntilUtc)
+            return QuoteAdjustedEquity(accountEquity, _excludedCollateralUsd);
+
         IReadOnlyDictionary<string, decimal> balances;
         try { balances = await _client.GetCollateralBalancesAsync(ct); }
-        catch (ApiException ex) { Log.Warn($"could not read collateral balances: {ex.Message}"); return; }
+        catch (ApiException ex)
+        {
+            Log.Warn($"could not read collateral balances for risk equity: {ex.Message}");
+            return accountEquity;
+        }
 
         var quote = _cfg.Trading.Markets.Select(QuoteCurrencyOf).Distinct().ToList();
-        var foreign = balances
-            .Where(kv => kv.Value > 0 && !quote.Contains(kv.Key, StringComparer.OrdinalIgnoreCase))
-            .OrderByDescending(kv => kv.Value)
-            .Select(kv => $"{kv.Key} {kv.Value:0.########}")
-            .ToList();
+        // Mixed quote currencies cannot be valued consistently without an FX
+        // policy. Leave account equity intact rather than silently invent one.
+        if (quote.Count != 1)
+        {
+            Log.Warn("multiple quote currencies configured - cannot isolate non-quote collateral from risk equity");
+            return accountEquity;
+        }
+
+        var foreign = balances.Where(kv => kv.Value > 0 &&
+            !quote.Contains(kv.Key, StringComparer.OrdinalIgnoreCase)).ToList();
 
         if (foreign.Count == 0)
         {
-            Log.Info($"collateral is {string.Join("/", quote)} only — equity locks measure trading results");
-            return;
+            _excludedCollateralUsd = 0;
+            _usingQuoteAdjustedRiskEquity = false;
+            _collateralValuationValidUntilUtc = DateTime.UtcNow.AddSeconds(_cfg.Risk.CollateralValuationRefreshSeconds);
+            if (!string.Equals(_lastCollateralNotice, "quote-only", StringComparison.Ordinal))
+            {
+                _lastCollateralNotice = "quote-only";
+                Log.Info($"collateral is {quote[0]} only — equity locks measure trading results");
+            }
+            return accountEquity;
         }
 
-        var msg = $"collateral holds non-{string.Join("/", quote)} assets: {string.Join(", ", foreign)}. " +
-                  "Their price moves count as PnL in the drawdown/profit locks and in the Telegram balance. " +
-                  "Convert them to the quote currency or move them to the main account.";
-        Log.Warn(msg);
-        _telegram?.Send($"⚠️ {msg}");
+        var valued = await Task.WhenAll(foreign.Select(x => ValueForeignCollateralAsync(x.Key, x.Value, quote[0], ct)));
+        if (valued.Any(x => !x.Priced))
+        {
+            var missing = string.Join(", ", valued.Where(x => !x.Priced).Select(x => x.Asset));
+            Log.Warn($"could not price non-{quote[0]} collateral ({missing}); using full account equity for risk until it can be priced");
+            return accountEquity;
+        }
+
+        _excludedCollateralUsd = valued.Sum(x => x.ValueUsd);
+        _usingQuoteAdjustedRiskEquity = _excludedCollateralUsd > 0;
+        _excludedCollateralDescription = string.Join(", ", valued.OrderByDescending(x => x.ValueUsd)
+            .Select(x => $"{x.Asset} {x.Amount:0.########} (~{x.ValueUsd:F2} {quote[0]})"));
+        _collateralValuationValidUntilUtc = DateTime.UtcNow.AddSeconds(_cfg.Risk.CollateralValuationRefreshSeconds);
+
+        var msg = $"non-{quote[0]} collateral is excluded from bot risk equity: {_excludedCollateralDescription}. " +
+                  $"Sizing and drawdown locks use {QuoteAdjustedEquity(accountEquity, _excludedCollateralUsd):F2} {quote[0]} " +
+                  $"instead of account equity {accountEquity:F2}. The assets remain exposed in cross margin.";
+        // Valuation refreshes every few seconds; notify only when the asset
+        // composition changes, not for ordinary mark-price movement.
+        var noticeKey = string.Join("|", valued.OrderBy(x => x.Asset).Select(x => $"{x.Asset}:{x.Amount}"));
+        if (!string.Equals(_lastCollateralNotice, noticeKey, StringComparison.Ordinal))
+        {
+            _lastCollateralNotice = noticeKey;
+            Log.Warn(msg);
+            _telegram?.Send($"⚠️ {_venueLabel}: {msg}");
+        }
+        return QuoteAdjustedEquity(accountEquity, _excludedCollateralUsd);
     }
+
+    private async Task<ForeignCollateralValue> ValueForeignCollateralAsync(
+        string asset, decimal amount, string quote, CancellationToken ct)
+    {
+        if (asset.Equals(quote, StringComparison.OrdinalIgnoreCase))
+            return new ForeignCollateralValue(asset, amount, amount, true);
+
+        var market = _cfg.Trading.Markets.FirstOrDefault()?.Contains('_') == true
+            ? $"{asset}_{quote}"
+            : $"{asset}{quote}";
+        try
+        {
+            var book = await _client.GetOrderBookAsync(market, 1, ct);
+            var mid = book?.Mid ?? 0;
+            return new ForeignCollateralValue(asset, amount, amount * mid, mid > 0);
+        }
+        catch (ApiException)
+        {
+            return new ForeignCollateralValue(asset, amount, 0, false);
+        }
+    }
+
+    public static decimal QuoteAdjustedEquity(decimal accountEquity, decimal excludedCollateralValue) =>
+        Math.Max(0m, accountEquity - Math.Max(0m, excludedCollateralValue));
 
     /// <summary>
     /// Equity that moves with nothing open and nothing pending is not the
@@ -525,7 +600,8 @@ public sealed class AutoTrader : IAsyncDisposable
 
         var summary = await _client.GetAccountSummaryAsync(ct);
         var positions = await _client.GetOpenPositionsAsync(null, ct);
-        var equity = summary?.Equity ?? 0m;
+        var grossEquity = summary?.Equity ?? 0m;
+        var equity = await RiskEquityAsync(grossEquity, ct);
 
         // Snapshot for /status, so a Telegram command answers from memory
         // instead of firing extra private API calls on demand.

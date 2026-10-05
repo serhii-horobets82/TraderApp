@@ -156,6 +156,16 @@ public class SoftRiskRulesTests
         Assert.Contains("entry spread 0.100%", result.Reason);
     }
 
+    [Theory]
+    [InlineData(212.74, 164.20, 48.54)]
+    [InlineData(100, 0, 100)]
+    [InlineData(10, 20, 0)]
+    public void Quote_adjusted_equity_never_counts_excluded_collateral_or_goes_negative(
+        decimal accountEquity, decimal excludedCollateral, decimal expected)
+    {
+        Assert.Equal(expected, AutoTrader.QuoteAdjustedEquity(accountEquity, excludedCollateral));
+    }
+
     [Fact]
     public void Journal_round_trips_and_digest_reports_fee_share()
     {

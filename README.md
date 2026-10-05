@@ -1,5 +1,8 @@
 # TraderApp — multi-venue collateral / linear scalper
 
+For the current decision, execution and risk flow, see
+[BOT_OPERATING_GUIDE.md](BOT_OPERATING_GUIDE.md).
+
 An auto-trading bot for **WhiteBIT collateral** markets (default) with optional
 **Bybit USDT linear** runners in the same process. It scores a set of common
 technical signals, sizes positions from a risk budget rather than a fixed

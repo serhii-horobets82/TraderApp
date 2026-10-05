@@ -113,6 +113,8 @@ public sealed class BotConfig
             errors.Add("Trading.PostOnlyFillWarningWindowMinutes must be between 1 and 1440.");
         if (Risk.ProfitLockRiskScale is < 0 or > 1)
             errors.Add("Risk.ProfitLockRiskScale must be in [0, 1]. 0 halts on the profit lock.");
+        if (Risk.CollateralValuationRefreshSeconds is < 5 or > 300)
+            errors.Add("Risk.CollateralValuationRefreshSeconds must be between 5 and 300.");
         if (Risk.WeekendRiskScale is <= 0 or > 1)
             errors.Add("Risk.WeekendRiskScale must be in (0, 1].");
         if (Telegram.Enabled && string.IsNullOrWhiteSpace(Telegram.BotToken))
@@ -619,6 +621,18 @@ public sealed class RiskConfig
 
     /// <summary>Close everything and halt when the account reports margin_call or liquidation state.</summary>
     public bool FlattenOnMarginCall { get; set; } = true;
+
+    /// <summary>
+    /// When collateral contains assets other than the markets' quote currency,
+    /// exclude their marked value from bot sizing and PnL locks. This stops an
+    /// ETH/BTC price move being mistaken for strategy PnL. It does not remove
+    /// those assets from the exchange cross-margin account or eliminate their
+    /// liquidation risk.
+    /// </summary>
+    public bool ExcludeNonQuoteCollateralFromRiskEquity { get; set; } = true;
+
+    /// <summary>How often public prices refresh for non-quote collateral valuation.</summary>
+    public int CollateralValuationRefreshSeconds { get; set; } = 10;
 
     /// <summary>
     /// Persist halt / loss-streak / daily entry counters to disk so a process
