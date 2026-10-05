@@ -37,8 +37,24 @@ public interface IExchangeClient : IDisposable
     Task<OrderResponse?> PlaceEntryLimitAsync(EntryLimitRequest request, CancellationToken ct);
     Task<OrderResponse?> PlaceReduceOnlyMarketAsync(ReduceOnlyMarketRequest request, CancellationToken ct);
     Task<object?> ClosePositionAsync(long positionId, string market, string? positionSide, CancellationToken ct);
-    Task<OrderResponse?> CancelOrderAsync(string market, long orderId, CancellationToken ct);
+    Task<OrderResponse?> CancelOrderAsync(string market, string orderId, CancellationToken ct);
     Task<IReadOnlyList<OrderResponse>> GetOpenOrdersAsync(string market, CancellationToken ct);
+
+    /// <summary>
+    /// Final-state lookup for an order that is no longer on the open book, so
+    /// "filled" can be told apart from "cancelled / rejected". Null when the
+    /// venue cannot say; callers then fall back to the position list.
+    /// </summary>
+    Task<OrderResponse?> GetOrderAsync(string market, string orderId, CancellationToken ct) =>
+        Task.FromResult<OrderResponse?>(null);
+
+    /// <summary>
+    /// When the position currently held on this market was actually opened,
+    /// reconstructed from execution history. Null when it cannot be determined
+    /// (no history, or the history does not reach back to a flat position).
+    /// </summary>
+    Task<DateTime?> ResolvePositionOpenedAsync(Position position, CancellationToken ct) =>
+        Task.FromResult<DateTime?>(null);
 }
 
 /// <summary>Exchange-agnostic entry limit (SL/TP attached when the venue supports OTO).</summary>
@@ -121,7 +137,16 @@ public static class SyntheticPositionId
 {
     public static long For(string market, bool isLong)
     {
-        var hash = StringComparer.OrdinalIgnoreCase.GetHashCode(market + (isLong ? ":L" : ":S"));
+        // FNV-1a, because string.GetHashCode is randomised per process: the id
+        // must be identical after a restart or persisted position state could
+        // never be matched back to the position.
+        var key = (market + (isLong ? ":L" : ":S")).ToUpperInvariant();
+        uint hash = 2166136261;
+        foreach (var ch in key)
+        {
+            hash ^= ch;
+            hash *= 16777619;
+        }
         // Keep non-zero positive so logs never show "#0".
         return (hash & 0x7FFF_FFFFL) + 1;
     }

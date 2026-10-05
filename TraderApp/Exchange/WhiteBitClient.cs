@@ -340,9 +340,15 @@ public sealed class WhiteBitClient : IExchangeClient
             new ClosePositionPayload { PositionId = positionId, Market = market, PositionSide = positionSide }, ct);
 
     /// <summary>POST /api/v4/order/cancel</summary>
-    public Task<OrderResponse?> CancelOrderAsync(string market, long orderId, CancellationToken ct) =>
-        PostAsync<OrderResponse>("/api/v4/order/cancel",
-            new CancelOrderPayload { Market = market, OrderId = orderId }, ct);
+    public Task<OrderResponse?> CancelOrderAsync(string market, string orderId, CancellationToken ct)
+    {
+        if (!long.TryParse(orderId, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var id) || id <= 0)
+            throw new ArgumentException($"WhiteBIT order id must be a positive integer, got '{orderId}'", nameof(orderId));
+
+        return PostAsync<OrderResponse>("/api/v4/order/cancel",
+            new CancelOrderPayload { Market = market, OrderId = id }, ct);
+    }
 
     /// <summary>POST /api/v4/orders - unexecuted (still open) orders for a market.</summary>
     public async Task<IReadOnlyList<OrderResponse>> GetOpenOrdersAsync(string market, CancellationToken ct)

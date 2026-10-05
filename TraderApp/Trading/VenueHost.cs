@@ -145,6 +145,10 @@ public static class VenueHost
         if (venue == ExchangeMode.Bybit && !string.IsNullOrWhiteSpace(journal))
             journal = InsertSuffix(journal, "bybit");
 
+        var positionState = t.PositionStatePath;
+        if (venue == ExchangeMode.Bybit && !string.IsNullOrWhiteSpace(positionState))
+            positionState = InsertSuffix(positionState, "bybit");
+
         return new TradingConfig
         {
             DryRun = t.DryRun,
@@ -181,7 +185,8 @@ public static class VenueHost
             PartialTakeFraction = t.PartialTakeFraction,
             EntryHoursUtcStart = t.EntryHoursUtcStart,
             EntryHoursUtcEnd = t.EntryHoursUtcEnd,
-            TradeJournalPath = journal
+            TradeJournalPath = journal,
+            PositionStatePath = positionState
         };
     }
 

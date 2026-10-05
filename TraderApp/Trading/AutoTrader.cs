@@ -17,6 +17,9 @@ internal sealed class ManagedPosition : ITradeState
     public required decimal EntryAtr { get; init; }
     public required DateTime OpenedUtc { get; init; }
 
+    /// <summary>Which source the opening time came from (venue, executions, saved, placed, first-seen).</summary>
+    public string OpenedSource { get; init; } = "";
+
     /// <summary>The stop the bot enforces. Moves to break-even, then trails.</summary>
     public decimal StopPrice { get; set; }
 
@@ -59,7 +62,38 @@ internal sealed class ManagedPosition : ITradeState
     public EntryContext? Entry { get; init; }
 }
 
-internal sealed record PendingEntry(long OrderId, string Market, bool IsLong, DateTime PlacedUtc);
+/// <summary>An entry order resting on the book. Ids are strings end to end: Bybit's are UUIDs.</summary>
+internal sealed class PendingEntry
+{
+    public PendingEntry(string orderId, string? clientOrderId, string market, bool isLong, DateTime placedUtc)
+    {
+        OrderId = orderId;
+        ClientOrderId = clientOrderId;
+        Market = market;
+        IsLong = isLong;
+        PlacedUtc = placedUtc;
+    }
+
+    public string OrderId { get; set; }
+    public string? ClientOrderId { get; }
+    public string Market { get; }
+    public bool IsLong { get; }
+    public DateTime PlacedUtc { get; }
+
+    /// <summary>Consecutive failed cancels; drives backoff so a stuck order is not retried every tick.</summary>
+    public int CancelFailures { get; set; }
+    public DateTime? NextCancelUtc { get; set; }
+
+    /// <summary>First tick the order was absent from the open book, while its outcome is still unconfirmed.</summary>
+    public DateTime? MissingSinceUtc { get; set; }
+
+    public string Label => string.IsNullOrEmpty(OrderId) ? $"[{ClientOrderId}]" : OrderId;
+
+    public bool Is(OrderResponse o) =>
+        (!string.IsNullOrEmpty(OrderId) && string.Equals(o.OrderId, OrderId, StringComparison.Ordinal)) ||
+        (!string.IsNullOrEmpty(ClientOrderId) &&
+         string.Equals(o.ClientOrderId, ClientOrderId, StringComparison.Ordinal));
+}
 
 /// <summary>A position that has closed but whose realised PnL has not been read back yet.</summary>
 internal sealed record ClosedTrade(
@@ -108,6 +142,17 @@ public sealed class AutoTrader : IAsyncDisposable
     private DateTime _lastTickUtc;
 
     private readonly TradeJournal _journal;
+    private readonly PositionStateStore _positionStore;
+    private readonly Dictionary<string, SavedPosition> _saved = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastPositionSaveUtc = DateTime.MinValue;
+    private string _lastPositionKeys = "";
+
+    /// <summary>Closed-PnL records already booked to a trade, so one record is never counted twice.</summary>
+    private readonly HashSet<string> _bookedClosedPnl = new(StringComparer.Ordinal);
+
+    private DateTime _entriesBlockedUntilUtc = DateTime.MinValue;
+    private bool _entryBlockNotified;
+    private static readonly TimeSpan EntryBlockReprobe = TimeSpan.FromHours(6);
     /// <summary>Signal context of the most recent entry order per market, attached to the position once it fills.</summary>
     private readonly Dictionary<string, (EntryContext Context, DateTime PlacedUtc)> _entryContext = new(StringComparer.OrdinalIgnoreCase);
     private DateOnly _lastDigestDay = DateOnly.FromDateTime(DateTime.UtcNow);
@@ -127,6 +172,7 @@ public sealed class AutoTrader : IAsyncDisposable
         _risk = new RiskManager(cfg.Risk, cfg.Trading);
         _live = !cfg.Trading.DryRun;
         _journal = new TradeJournal(cfg.Trading.TradeJournalPath);
+        _positionStore = new PositionStateStore(cfg.Trading.PositionStatePath);
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -321,6 +367,8 @@ public sealed class AutoTrader : IAsyncDisposable
         var positions = await _client.GetOpenPositionsAsync(null, ct);
         foreach (var p in positions.Where(p => p.Market is not null))
             Log.Warn($"pre-existing position {p.Market} #{p.PositionId} size {p.Amount} @ {p.BasePrice} - will be adopted and managed");
+
+        LoadSavedPositions();
     }
 
     /// <summary>
@@ -493,7 +541,7 @@ public sealed class AutoTrader : IAsyncDisposable
             return;
         }
 
-        await ReconcilePendingAsync(ct);
+        await ReconcilePendingAsync(positions, ct);
 
         var openNotional = positions.Sum(p => p.AbsAmount * p.BasePrice);
 
@@ -503,6 +551,7 @@ public sealed class AutoTrader : IAsyncDisposable
             if (pos.Market is null) continue;
             await ManagePositionAsync(pos, ct);
         }
+        PersistManagedPositions(positions);
 
         // 2. Scan every market, then take the single best setup. Filling
         //    slots in list order put ETH (first) on a stale trend and SOL
@@ -515,6 +564,7 @@ public sealed class AutoTrader : IAsyncDisposable
             Log.Info($"equity {equity:F2} | open {positions.Count} | notional {openNotional:F2} | " +
                      $"pending {_pending.Count} | trades today {_risk.EntriesToday}/{_cfg.Risk.MaxTradesPerDay} | " +
                      $"loss streak {_risk.ConsecutiveLosses}" +
+                     (_risk.ConsecutiveSmallLosses > 0 ? $" ({_risk.ConsecutiveSmallLosses} fee-sized, {_risk.LossStreakUsd:0.00} USDT)" : "") +
                      (scale < 1 ? $" | risk x{scale:0.##}{(_risk.ProfitLocked ? " (profit lock)" : "")}" : ""));
         }
 
@@ -612,12 +662,11 @@ public sealed class AutoTrader : IAsyncDisposable
     /// start of the line is the only way to get red/green, and it has the bonus
     /// of showing up in the chat-list preview.
     /// </summary>
-    private static string FormatClose(ClosedTrade t, ClosedPnl rec, decimal pct, decimal equity)
+    private static string FormatClose(ClosedTrade t, ClosedPnl rec, decimal pct, decimal equity, TimeSpan held)
     {
         var win = rec.NetPnl >= 0;
         var side = t.IsLong ? "long" : "short";
 
-        var held = rec.Held;
         var heldText = held <= TimeSpan.Zero
             ? "?"
             : held.TotalHours >= 1
@@ -736,6 +785,9 @@ public sealed class AutoTrader : IAsyncDisposable
     private async Task ConsiderEntriesAsync(
         decimal equity, decimal openNotional, IReadOnlyList<Position> positions, CancellationToken ct)
     {
+        if (EntriesBlockedByVenue())
+            return;
+
         var reserved = _pending.Select(p => p.Market).ToList();
         var slots = _cfg.Risk.MaxConcurrentPositions - positions.Count - _pending.Count;
         if (slots <= 0)
@@ -982,16 +1034,27 @@ public sealed class AutoTrader : IAsyncDisposable
             var order = await _client.PlaceEntryLimitAsync(payload, ct);
             if (order is null) return;
 
-            _pending.Add(new PendingEntry(order.OrderId, market, isLong, DateTime.UtcNow));
+            if (string.IsNullOrWhiteSpace(order.OrderId))
+                Log.Warn($"{market}: venue returned no order id for {payload.ClientOrderId} - " +
+                         "tracking it by client order id");
+
+            _pending.Add(new PendingEntry(
+                order.OrderId ?? "", order.ClientOrderId ?? payload.ClientOrderId, market, isLong, DateTime.UtcNow));
             Log.Trade($"{market}: entry order #{order.OrderId} placed ({order.Status}), left {order.Left}");
+            NoteEntriesAccepted();
         }
         catch (ApiException ex)
         {
+            if (IsEntryBlocked(ex))
+            {
+                BlockEntriesForVenue(market, ex);
+                return;
+            }
             Log.Warn($"{market}: entry rejected - {ex.Message}");
         }
     }
 
-    private async Task ReconcilePendingAsync(CancellationToken ct)
+    private async Task ReconcilePendingAsync(IReadOnlyList<Position> positions, CancellationToken ct)
     {
         if (_pending.Count == 0) return;
 
@@ -1002,36 +1065,210 @@ public sealed class AutoTrader : IAsyncDisposable
             try { open = await _client.GetOpenOrdersAsync(p.Market, ct); }
             catch (ApiException ex) { Log.Warn($"{p.Market}: could not list open orders - {ex.Message}"); continue; }
 
-            var still = open.FirstOrDefault(o => o.OrderId == p.OrderId);
+            var still = open.FirstOrDefault(p.Is);
             if (still is null)
             {
-                // Gone from the book without us cancelling it, so it filled. This
-                // is the point at which a trade has actually happened, and the
-                // only point at which the cooldown and rate limit should apply.
-                _risk.RecordEntry(p.Market);
-                Log.Trade($"{p.Market}: entry #{p.OrderId} filled");
-                if (_cfg.Telegram.SendTrades)
-                    _telegram?.Send($"Opened {Short(p.Market)} {(p.IsLong ? "long" : "short")}");
-                _pending.Remove(p);
+                await SettleMissingEntryAsync(p, positions, ct);
                 continue;
             }
 
+            p.MissingSinceUtc = null;
+            if (string.IsNullOrEmpty(p.OrderId) && !string.IsNullOrEmpty(still.OrderId))
+                p.OrderId = still.OrderId;
+
             if (DateTime.UtcNow - p.PlacedUtc <= timeout) continue;
+            if (p.NextCancelUtc is { } next && DateTime.UtcNow < next) continue;
 
             try
             {
                 await _client.CancelOrderAsync(p.Market, p.OrderId, ct);
-                Log.Trade($"{p.Market}: entry #{p.OrderId} not filled within {timeout.TotalSeconds:F0}s - " +
+                Log.Trade($"{p.Market}: entry #{p.Label} not filled within {timeout.TotalSeconds:F0}s - " +
                           "cancelled (no cooldown consumed)");
                 _pending.Remove(p);
             }
+            catch (ApiException ex) when (IsOrderAlreadyGone(ex))
+            {
+                // It left the book between the listing and the cancel: filled or
+                // cancelled elsewhere. Ask the venue rather than guess.
+                Log.Info($"{p.Market}: entry #{p.Label} is already gone from the book - confirming outcome");
+                await SettleMissingEntryAsync(p, positions, ct);
+            }
             catch (ApiException ex)
             {
-                // Leave it in the list and retry next tick rather than losing
-                // track of a live order, which is what the old code did.
-                Log.Warn($"{p.Market}: cancel of #{p.OrderId} failed - {ex.Message}");
+                p.CancelFailures++;
+                var backoff = TimeSpan.FromSeconds(Math.Min(60, 2 * Math.Pow(2, Math.Min(p.CancelFailures - 1, 5))));
+                p.NextCancelUtc = DateTime.UtcNow + backoff;
+                var line = $"{p.Market}: cancel of #{p.Label} failed (attempt {p.CancelFailures}, " +
+                           $"retry in {backoff.TotalSeconds:F0}s) - {ex.Message}";
+
+                if (p.CancelFailures >= MaxCancelAttempts)
+                {
+                    // Stop pretending to manage it: an order that cannot be cancelled
+                    // 10 times will not be cancelled by an 11th, and a tracked-but-stuck
+                    // entry blocks every slot. Say so loudly instead.
+                    Log.Error($"{line} - giving up; check the order in the exchange UI");
+                    _telegram?.Send($"⚠️ {_venueLabel}: could not cancel the {Short(p.Market)} entry order " +
+                                    $"after {p.CancelFailures} attempts. Cancel it manually.");
+                    _pending.Remove(p);
+                }
+                else if (p.CancelFailures == 1 || p.CancelFailures % 5 == 0) Log.Warn(line);
+                else Log.Info(line);
+            }
+            catch (ArgumentException ex)
+            {
+                Log.Error($"{p.Market}: cannot cancel entry - {ex.Message}");
+                _pending.Remove(p);
             }
         }
+    }
+
+    private const int MaxCancelAttempts = 10;
+    private static readonly TimeSpan EntryOutcomeGrace = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// An entry order is no longer on the open book. That alone does not mean
+    /// it filled: it may have been rejected (post-only crossing the spread),
+    /// cancelled, or expired. Only a fill starts the cooldown and rate limits.
+    /// </summary>
+    private async Task SettleMissingEntryAsync(PendingEntry p, IReadOnlyList<Position> positions, CancellationToken ct)
+    {
+        OrderResponse? info = null;
+        if (!string.IsNullOrEmpty(p.OrderId))
+        {
+            try { info = await _client.GetOrderAsync(p.Market, p.OrderId, ct); }
+            catch (ApiException ex) { Log.Info($"{p.Market}: could not read final state of #{p.Label} - {ex.Message}"); }
+        }
+
+        var holding = positions.Any(x =>
+            x.AbsAmount > 0 &&
+            string.Equals(x.Market, p.Market, StringComparison.OrdinalIgnoreCase) &&
+            x.IsLong == p.IsLong);
+
+        switch (ClassifyEntry(info, holding))
+        {
+            case EntryOutcome.Filled:
+                _risk.RecordEntry(p.Market);
+                Log.Trade($"{p.Market}: entry #{p.Label} filled" +
+                          (info is { DealStock: > 0 } ? $" ({info.DealStock} of {info.Amount})" : ""));
+                if (_cfg.Telegram.SendTrades)
+                    _telegram?.Send($"Opened {Short(p.Market)} {(p.IsLong ? "long" : "short")}");
+                _pending.Remove(p);
+                break;
+
+            case EntryOutcome.NotFilled:
+                Log.Trade($"{p.Market}: entry #{p.Label} ended without a fill ({info?.Status}) - " +
+                          "no entry recorded, no cooldown consumed");
+                _pending.Remove(p);
+                break;
+
+            default:
+                p.MissingSinceUtc ??= DateTime.UtcNow;
+                if (DateTime.UtcNow - p.MissingSinceUtc.Value < EntryOutcomeGrace) break;
+
+                Log.Warn($"{p.Market}: entry #{p.Label} left the book and its outcome could not be confirmed " +
+                         $"in {EntryOutcomeGrace.TotalSeconds:F0}s - dropping it from tracking; any position " +
+                         "that exists is still managed");
+                _pending.Remove(p);
+                break;
+        }
+    }
+
+    public enum EntryOutcome { Filled, NotFilled, Unknown }
+
+    /// <summary>
+    /// Decides what happened to an entry order that is off the open book, from
+    /// the venue's own final state when it has one, else from whether a
+    /// position now exists on that market and side.
+    /// </summary>
+    public static EntryOutcome ClassifyEntry(OrderResponse? info, bool positionOnMarket)
+    {
+        if (info is not null)
+        {
+            if (info.DealStock > 0) return EntryOutcome.Filled;
+
+            var status = (info.Status ?? "").Replace("_", "", StringComparison.Ordinal);
+            if (status.Equals("Filled", StringComparison.OrdinalIgnoreCase)) return EntryOutcome.Filled;
+            if (status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Canceled", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Rejected", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Deactivated", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("Expired", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("PartiallyFilledCanceled", StringComparison.OrdinalIgnoreCase))
+                return EntryOutcome.NotFilled;
+        }
+
+        return positionOnMarket ? EntryOutcome.Filled : EntryOutcome.Unknown;
+    }
+
+    /// <summary>
+    /// Bybit answers a cancel for an order that already left the book with
+    /// retCode 110001 ("order not exists or too late to cancel"). Retrying that
+    /// is pointless - the order is gone, and the question is only how it ended.
+    /// </summary>
+    public static bool IsOrderAlreadyGone(ApiException ex)
+    {
+        var body = ex.Body ?? "";
+        return body.Contains("110001", StringComparison.Ordinal)
+            || body.Contains("order not exists", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("too late to cancel", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Venue entry restriction ─────────────────────────────────────────
+
+    /// <summary>
+    /// Whether the venue is refusing new orders for account reasons rather than
+    /// for anything about this particular order. WhiteBIT answers every entry
+    /// with "Margin trading is not available for your account due to trading
+    /// restrictions"; retrying each tick only repeats the same rejection.
+    /// </summary>
+    public static bool IsEntryBlocked(ApiException ex)
+    {
+        if (ex.Status == HttpStatusCode.TooManyRequests || (int)ex.Status >= 500) return false;
+
+        var body = ex.Body ?? "";
+        return body.Contains("trading restrictions", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("Margin trading is not available", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("account is restricted", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("retCode=10024", StringComparison.Ordinal)   // Bybit: compliance rules triggered
+            || body.Contains("retCode=10027", StringComparison.Ordinal);  // Bybit: transactions banned
+    }
+
+    private bool EntriesBlockedByVenue()
+    {
+        if (DateTime.UtcNow >= _entriesBlockedUntilUtc) return false;
+
+        if (ShouldStatusLog())
+            Log.Info($"entries blocked on {_venueLabel} (account restriction) - next attempt after " +
+                     $"{_entriesBlockedUntilUtc:HH:mm} UTC");
+        return true;
+    }
+
+    private void BlockEntriesForVenue(string market, ApiException ex)
+    {
+        _entriesBlockedUntilUtc = DateTime.UtcNow + EntryBlockReprobe;
+
+        if (_entryBlockNotified)
+        {
+            Log.Warn($"{market}: {_venueLabel} still refuses entries - pausing for {EntryBlockReprobe.TotalHours:F0}h");
+            return;
+        }
+
+        _entryBlockNotified = true;
+        Log.Error($"{market}: {_venueLabel} refuses new orders on this account - {ex.Message}. " +
+                  $"No entries will be attempted here for {EntryBlockReprobe.TotalHours:F0}h.");
+        _telegram?.Send(
+            $"🚫 {_venueLabel} is rejecting entry orders\n{ex.Message}\n\n" +
+            $"No entries will be attempted on this venue for {EntryBlockReprobe.TotalHours:F0}h, then it tries once more. " +
+            "Open positions here (if any) stay managed. Fix the account restriction in the exchange UI.");
+    }
+
+    private void NoteEntriesAccepted()
+    {
+        if (!_entryBlockNotified) return;
+        _entryBlockNotified = false;
+        _entriesBlockedUntilUtc = DateTime.MinValue;
+        Log.Info($"{_venueLabel} accepted an entry again - restriction lifted");
+        _telegram?.Send($"✅ {_venueLabel} accepted an entry order again. The earlier restriction has lifted.");
     }
 
     // ── Position management ─────────────────────────────────────────────
@@ -1065,18 +1302,23 @@ public sealed class AutoTrader : IAsyncDisposable
         if (_awaitingPnl.Count == 0) return;
 
         IReadOnlyList<ClosedPnl> closed;
-        try { closed = await _client.GetClosedPnlAsync(20, ct); }
+        try { closed = await _client.GetClosedPnlAsync(50, ct); }
         catch (ApiException ex) { Log.Warn($"could not read closed PnL - {ex.Message}"); return; }
 
         foreach (var t in _awaitingPnl.ToList())
         {
-            var rec = closed.FirstOrDefault(c => c.PositionId == t.PositionId)
-                      ?? closed.FirstOrDefault(c =>
-                          string.Equals(c.Market, t.Market, StringComparison.OrdinalIgnoreCase) &&
-                          (t.ClosedUtc - DateTimeOffset.FromUnixTimeSeconds(c.CloseDate).UtcDateTime).Duration()
-                              < TimeSpan.FromMinutes(15));
+            var matched = MatchClosedRecords(
+                closed, t.PositionId, t.Market, t.State.OpenedUtc, t.ClosedUtc, _bookedClosedPnl);
 
-            if (rec is null)
+            // A partial take books its own record while the position is still
+            // open. If only that one has appeared, the final close is still on its
+            // way - booking now would count half the trade.
+            if (matched.Count > 0 && t.State.PartialTaken &&
+                matched.Sum(r => r.ClosedSize) < t.State.InitialSize * 0.98m &&
+                DateTime.UtcNow - t.ClosedUtc < TimeSpan.FromMinutes(2))
+                continue;
+
+            if (matched.Count == 0)
             {
                 // Give the exchange a little time before giving up on the number.
                 if (DateTime.UtcNow - t.ClosedUtc < TimeSpan.FromMinutes(2)) continue;
@@ -1090,20 +1332,61 @@ public sealed class AutoTrader : IAsyncDisposable
                 continue;
             }
 
+            foreach (var r in matched) _bookedClosedPnl.Add(r.RecordKey);
+            var rec = ClosedPnl.Merge(matched);
+
             var notional = rec.AvgEntryPrice * rec.ClosedSize;
             var pct = notional > 0 ? rec.NetPnl / notional * 100m : 0m;
 
             _risk.RecordTradeResult(profitable: rec.NetPnl > 0, netPnl: rec.NetPnl);
             Log.Trade($"{t.Market} #{t.PositionId} closed: net {rec.NetPnl:+0.0000;-0.0000} USDT " +
-                      $"({pct:+0.00;-0.00}%), fees {rec.TotalTradeFee:F4}, funding {rec.TotalFunding:F4}");
+                      $"({pct:+0.00;-0.00}%), fees {rec.TotalTradeFee:F4}, funding {rec.TotalFunding:F4}" +
+                      (matched.Count > 1 ? $" [{matched.Count} records]" : ""));
 
-            _journal.Append(BuildRecord(t, rec, pct));
+            var record = BuildRecord(t, rec, pct);
+            _journal.Append(record);
 
             if (_cfg.Telegram.SendTrades)
-                _telegram?.Send(FormatClose(t, rec, pct, equity));
+                _telegram?.Send(FormatClose(t, rec, pct, equity, TimeSpan.FromMinutes(record.HeldMinutes)));
 
             _awaitingPnl.Remove(t);
         }
+
+        // Bounded: the venue only returns recent records, so older keys can never match again.
+        if (_bookedClosedPnl.Count > 500) _bookedClosedPnl.Clear();
+    }
+
+    /// <summary>
+    /// Picks the closed-PnL records that belong to one trade. Bybit's position
+    /// id is synthetic (symbol + side), so the same id recurs for every trade
+    /// on that symbol: matching on it alone returned the previous trade's
+    /// record whenever the new one had not posted yet. Records are therefore
+    /// also limited to the trade's own time window and to those not already
+    /// booked to an earlier trade.
+    /// </summary>
+    public static IReadOnlyList<ClosedPnl> MatchClosedRecords(
+        IReadOnlyList<ClosedPnl> closed, long positionId, string market,
+        DateTime openedUtc, DateTime closedUtc, ISet<string> booked)
+    {
+        var from = openedUtc - TimeSpan.FromSeconds(60);
+        var to = closedUtc + TimeSpan.FromMinutes(10);
+
+        var candidates = closed
+            .Where(c => c.CloseDate > 0 &&
+                        !booked.Contains(c.RecordKey) &&
+                        string.Equals(c.Market, market, StringComparison.OrdinalIgnoreCase))
+            .Where(c =>
+            {
+                var at = DateTimeOffset.FromUnixTimeSeconds(c.CloseDate).UtcDateTime;
+                return at >= from && at <= to;
+            })
+            .ToList();
+
+        var byId = candidates.Where(c => c.PositionId == positionId).ToList();
+        // Venues that report real position ids (WhiteBIT) can fall back to market + time.
+        // Venues that report an order id (Bybit) cannot: a miss there means "not posted yet".
+        var chosen = byId.Count > 0 ? byId : candidates.Where(c => c.OrderId.Length == 0).ToList();
+        return chosen.OrderBy(c => c.CloseDate).ToList();
     }
 
     private TradeRecord BuildRecord(ClosedTrade t, ClosedPnl rec, decimal pct)
@@ -1111,8 +1394,11 @@ public sealed class AutoTrader : IAsyncDisposable
         var m = t.State;
         var stopDistance = m.EntryAtr * _cfg.Trading.StopLossAtrMult;
         var initialRisk = m.InitialSize * stopDistance;
+        // The exchange's closed-PnL row carries an opening time only on venues that
+        // track real positions; otherwise the bot's own verified opening time is used.
         var opened = rec.OpenDate > 0 ? DateTimeOffset.FromUnixTimeSeconds(rec.OpenDate).UtcDateTime : m.OpenedUtc;
         var closed = rec.CloseDate > 0 ? DateTimeOffset.FromUnixTimeSeconds(rec.CloseDate).UtcDateTime : t.ClosedUtc;
+        if (closed < opened) closed = opened;
 
         return new TradeRecord
         {
@@ -1121,6 +1407,7 @@ public sealed class AutoTrader : IAsyncDisposable
             Side = t.IsLong ? "long" : "short",
             OpenedUtc = opened,
             ClosedUtc = closed,
+            OpenedSource = m.OpenedSource,
             HeldMinutes = Math.Round((closed - opened).TotalMinutes, 1),
             EntryPrice = rec.AvgEntryPrice,
             ExitPrice = rec.AvgExitPrice,
@@ -1420,29 +1707,14 @@ public sealed class AutoTrader : IAsyncDisposable
     /// </summary>
     private async Task<ManagedPosition?> AdoptAsync(Position pos, MarketRules rules, CancellationToken ct)
     {
-        var candles = await _client.GetKlinesAsync(
-            pos.Market!, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
-        if (candles.Count < _cfg.Signals.AtrPeriod + 2)
-        {
-            Log.Warn($"{pos.Market}: cannot adopt #{pos.PositionId}, not enough candles for ATR");
-            return null;
-        }
-
-        var atrSeries = Ta.Atr(candles, _cfg.Signals.AtrPeriod);
-        var atr = Ta.IsUsable(atrSeries[^1]) ? (decimal)atrSeries[^1] : 0m;
-        if (atr <= 0)
-        {
-            Log.Warn($"{pos.Market}: cannot adopt #{pos.PositionId}, ATR unavailable");
-            return null;
-        }
-
+        var market = pos.Market!;
         var isLong = pos.IsLong;
         var sign = isLong ? 1m : -1m;
         var entry = pos.BasePrice;
 
         if (entry <= 0)
         {
-            Log.Warn($"{pos.Market}: cannot adopt #{pos.PositionId}, no usable base price");
+            Log.Warn($"{market}: cannot adopt #{pos.PositionId}, no usable base price");
             return null;
         }
 
@@ -1450,33 +1722,199 @@ public sealed class AutoTrader : IAsyncDisposable
         // placed an order on this market a few minutes ago, the position is
         // ours and carries that signal's context; otherwise it is adopted.
         EntryContext? context = null;
-        if (_entryContext.TryGetValue(pos.Market!, out var ctx) &&
-            DateTime.UtcNow - ctx.PlacedUtc < TimeSpan.FromMinutes(15))
+        DateTime? placedUtc = null;
+        var hasFreshContext = _entryContext.TryGetValue(market, out var ctx) &&
+                              DateTime.UtcNow - ctx.PlacedUtc < TimeSpan.FromMinutes(15);
+        if (hasFreshContext)
         {
             context = ctx.Context;
-            _entryContext.Remove(pos.Market!);
+            placedUtc = ctx.PlacedUtc;
         }
 
-        var m = new ManagedPosition
-        {
-            PositionId = pos.PositionId,
-            Market = pos.Market!,
-            IsLong = isLong,
-            EntryPrice = entry,
-            EntryAtr = atr,
-            OpenedUtc = pos.OpenedAtUtc == default ? DateTime.UtcNow : pos.OpenedAtUtc,
-            Adopted = context is null,
-            InitialSize = pos.AbsAmount,
-            Entry = context,
-            HighWater = entry,
-            StopPrice = rules.SnapPriceForSide(entry - sign * atr * _cfg.Trading.StopLossAtrMult, isBuy: !isLong),
-            TakeProfitPrice = rules.SnapPriceForSide(entry + sign * atr * _cfg.Trading.TakeProfitAtrMult, isBuy: isLong)
-        };
+        // State written by an earlier run of this very trade (restart mid-trade).
+        // Ignored when this session has just placed a newer order on the market:
+        // that position is a new trade even if the symbol and side repeat.
+        var key = SavedPosition.KeyOf(market, isLong);
+        SavedPosition? saved = null;
+        if (_saved.TryGetValue(key, out var candidate) &&
+            candidate.Matches(entry, pos.AbsAmount) &&
+            (placedUtc is not { } placed || candidate.OpenedUtc >= placed - TimeSpan.FromSeconds(10)))
+            saved = candidate;
 
-        Log.Trade($"{pos.Market}: {(context is null ? "adopted" : "managing")} #{pos.PositionId} {(isLong ? "LONG" : "SHORT")} " +
-                  $"entry {entry} stop {m.StopPrice} tp {m.TakeProfitPrice} (ATR {atr})");
+        var (opened, source) = await ResolveOpenedAsync(pos, saved, placedUtc, ct);
+
+        ManagedPosition m;
+        if (saved is not null)
+        {
+            m = new ManagedPosition
+            {
+                PositionId = pos.PositionId,
+                Market = market,
+                IsLong = isLong,
+                EntryPrice = saved.EntryPrice,
+                EntryAtr = saved.EntryAtr,
+                OpenedUtc = opened,
+                OpenedSource = source,
+                Adopted = saved.Adopted,
+                InitialSize = saved.InitialSize,
+                Entry = saved.Entry,
+                HighWater = saved.HighWater,
+                StopPrice = saved.StopPrice,
+                TakeProfitPrice = saved.TakeProfitPrice,
+                MovedToBreakEven = saved.MovedToBreakEven,
+                MaxFavourableR = saved.MaxFavourableR,
+                PartialTaken = saved.PartialTaken
+            };
+        }
+        else
+        {
+            var candles = await _client.GetKlinesAsync(
+                market, _cfg.Trading.EntryInterval, _cfg.Trading.CandleLookback, ct);
+            if (candles.Count < _cfg.Signals.AtrPeriod + 2)
+            {
+                Log.Warn($"{market}: cannot adopt #{pos.PositionId}, not enough candles for ATR");
+                return null;
+            }
+
+            var atrSeries = Ta.Atr(candles, _cfg.Signals.AtrPeriod);
+            var atr = Ta.IsUsable(atrSeries[^1]) ? (decimal)atrSeries[^1] : 0m;
+            if (atr <= 0)
+            {
+                Log.Warn($"{market}: cannot adopt #{pos.PositionId}, ATR unavailable");
+                return null;
+            }
+
+            m = new ManagedPosition
+            {
+                PositionId = pos.PositionId,
+                Market = market,
+                IsLong = isLong,
+                EntryPrice = entry,
+                EntryAtr = atr,
+                OpenedUtc = opened,
+                OpenedSource = source,
+                Adopted = context is null,
+                InitialSize = pos.AbsAmount,
+                Entry = context,
+                HighWater = entry,
+                StopPrice = rules.SnapPriceForSide(entry - sign * atr * _cfg.Trading.StopLossAtrMult, isBuy: !isLong),
+                TakeProfitPrice = rules.SnapPriceForSide(entry + sign * atr * _cfg.Trading.TakeProfitAtrMult, isBuy: isLong)
+            };
+        }
+
+        if (hasFreshContext) _entryContext.Remove(market);
+        _saved.Remove(key);
+
+        var heldMin = (DateTime.UtcNow - opened).TotalMinutes;
+        Log.Trade($"{market}: {(saved is not null ? "resumed" : m.Adopted ? "adopted" : "managing")} #{pos.PositionId} " +
+                  $"{(isLong ? "LONG" : "SHORT")} entry {m.EntryPrice} stop {m.StopPrice} tp {m.TakeProfitPrice} " +
+                  $"(ATR {m.EntryAtr}) | opened {opened:HH:mm:ss} UTC via {source}, age {heldMin:F1}m");
         return m;
     }
+
+    /// <summary>
+    /// Establishes when the position now held was opened, preferring evidence
+    /// about this specific trade. Bybit's createdTime is deliberately not one
+    /// of the sources: it is the symbol's first-ever position time.
+    ///   venue       the position's own openTime
+    ///   executions  replay of fills back to the last flat point
+    ///   saved       the time recorded before a restart
+    ///   placed      when this session placed the entry order
+    ///   first-seen  now - never older than the bot actually knows
+    /// Each candidate must pass <see cref="OpenTimeRules.Verify"/>.
+    /// </summary>
+    private async Task<(DateTime Opened, string Source)> ResolveOpenedAsync(
+        Position pos, SavedPosition? saved, DateTime? placedUtc, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        if (OpenTimeRules.Verify(pos.OpenedAtUtc, now, placedUtc) is { } fromVenue)
+            return (fromVenue, "venue");
+
+        try
+        {
+            var fromHistory = await _client.ResolvePositionOpenedAsync(pos, ct);
+            if (OpenTimeRules.Verify(fromHistory, now, placedUtc) is { } v)
+                return (v, "executions");
+            if (fromHistory is not null)
+                Log.Warn($"{pos.Market}: execution history put the opening at {fromHistory:u}, which is " +
+                         "inconsistent with this session's entry order - ignored");
+        }
+        catch (ApiException ex)
+        {
+            Log.Warn($"{pos.Market}: could not read execution history for the opening time - {ex.Message}");
+        }
+
+        if (saved is not null && OpenTimeRules.Verify(saved.OpenedUtc, now, placedUtc) is { } fromSaved)
+            return (fromSaved, "saved");
+
+        if (placedUtc is { } placed)
+            return (placed, "placed");
+
+        return (now, "first-seen");
+    }
+
+    // ── Position state persistence ──────────────────────────────────────
+
+    private void LoadSavedPositions()
+    {
+        foreach (var sp in _positionStore.Load())
+        {
+            if (string.IsNullOrWhiteSpace(sp.Market)) continue;
+            _saved[sp.Key] = sp;
+        }
+
+        if (_saved.Count > 0)
+            Log.Info($"loaded saved state for {_saved.Count} position(s) from {_positionStore.FilePath}: " +
+                     string.Join(", ", _saved.Values.Select(v => $"{v.Market} {(v.IsLong ? "L" : "S")} opened {v.OpenedUtc:u}")));
+    }
+
+    /// <summary>
+    /// Writes the state of every live position. A saved record whose position
+    /// the exchange still reports is kept even before it is adopted, so a failed
+    /// adoption (missing candles, say) cannot wipe the only copy of its opening time.
+    /// </summary>
+    private void PersistManagedPositions(IReadOnlyList<Position> positions)
+    {
+        if (!_live || !_positionStore.Enabled) return;
+
+        var list = _managed.Values.Select(ToSaved).ToList();
+        foreach (var kv in _saved)
+        {
+            var stillOpen = positions.Any(p =>
+                p.AbsAmount > 0 && p.Market is not null &&
+                SavedPosition.KeyOf(p.Market, p.IsLong) == SavedPosition.KeyOf(kv.Value.Market, kv.Value.IsLong));
+            if (stillOpen && list.All(x => x.Key != kv.Key)) list.Add(kv.Value);
+        }
+        list = list.OrderBy(x => x.Key, StringComparer.Ordinal).ToList();
+
+        var keys = string.Join(",", list.Select(x => x.Key));
+        var setChanged = keys != _lastPositionKeys;
+        if (!setChanged && DateTime.UtcNow - _lastPositionSaveUtc < TimeSpan.FromSeconds(10)) return;
+
+        _positionStore.Save(list);
+        _lastPositionKeys = keys;
+        _lastPositionSaveUtc = DateTime.UtcNow;
+    }
+
+    private static SavedPosition ToSaved(ManagedPosition m) => new()
+    {
+        Market = m.Market,
+        IsLong = m.IsLong,
+        OpenedUtc = m.OpenedUtc,
+        OpenedSource = m.OpenedSource,
+        EntryPrice = m.EntryPrice,
+        EntryAtr = m.EntryAtr,
+        InitialSize = m.InitialSize,
+        StopPrice = m.StopPrice,
+        TakeProfitPrice = m.TakeProfitPrice,
+        HighWater = m.HighWater,
+        MovedToBreakEven = m.MovedToBreakEven,
+        MaxFavourableR = m.MaxFavourableR,
+        PartialTaken = m.PartialTaken,
+        Adopted = m.Adopted,
+        Entry = m.Entry
+    };
 
     private bool ShouldStatusLog()
     {
@@ -1570,11 +2008,11 @@ public sealed class AutoTrader : IAsyncDisposable
             try
             {
                 await _client.CancelOrderAsync(p.Market, p.OrderId, cts.Token);
-                Log.Info($"{p.Market}: cancelled resting entry #{p.OrderId} on shutdown");
+                Log.Info($"{p.Market}: cancelled resting entry #{p.Label} on shutdown");
             }
             catch (Exception ex)
             {
-                Log.Warn($"{p.Market}: could not cancel #{p.OrderId} on shutdown - {ex.Message}");
+                Log.Warn($"{p.Market}: could not cancel #{p.Label} on shutdown - {ex.Message}");
             }
         }
 

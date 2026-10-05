@@ -166,7 +166,7 @@ nothing.
 | Session drawdown | −2% from start equity | Flatten + halt |
 | Peak drawdown | −2% from session peak | Flatten + halt (protects winners from give-back) |
 | Daily profit lock | +3% session | Continue at `ProfitLockRiskScale` (×0.5) until UTC midnight; `0` halts instead |
-| Consecutive losses | 10 | Hard halt (`HaltOnConsecutiveLosses`) |
+| Consecutive losses | 10 | Hard halt (`HaltOnConsecutiveLosses`). Fee-sized losses (within `FeeNoiseUsd`) count too; a fee-sized win does not reset the streak |
 | Max concurrent | 2 | A long and a short may coexist |
 | Same-direction cap | 1 | No stacked longs/shorts across alts — they move together, so two longs is one bet with double fees |
 | Total notional | 160 | Must be ≥ slots × per-position cap, or the last slot trades crumbs (a 10 USDT SUI position paid full fees for a third of the intended risk) |
@@ -243,6 +243,7 @@ The settings worth knowing:
 | `Trading.PartialTakeAtR` / `PartialTakeFraction` | `1.5` / `0.5` | Bank half at 1.5R, rest to break-even (0 = off) |
 | `Trading.MaxPositionMinutes` | `300` | Time stop; must give a 3×ATR target room on 15m bars |
 | `Trading.TradeJournalPath` | `data/trades.jsonl` | One JSON line per closed trade with its entry context |
+| `Trading.PositionStatePath` | `data/positions.json` | Per-position state (verified opening time, stops, partial-take flag) so a restart resumes the trade instead of resetting its age. Bybit gets a `-bybit` sibling file; put it on a volume to survive redeploys |
 | `Signals.MinBookDepthUsd` | `1000` | Thin-side depth over the top 10 levels below this is a veto |
 | `Risk.MaxConcurrentPositions` | `2` | With `MaxSameDirectionPositions: 1` — one long plus one short at most |
 | `Risk.MaxTotalNotionalUsd` | `160` | Slots × per-position cap; smaller and the last slot is undersized |

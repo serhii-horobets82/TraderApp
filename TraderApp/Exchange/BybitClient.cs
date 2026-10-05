@@ -33,14 +33,15 @@ public sealed class BybitClient : IExchangeClient
 
     public string ExchangeId => "Bybit";
 
-    public BybitClient(BybitConfig cfg)
+    public BybitClient(BybitConfig cfg) : this(cfg, null) { }
+
+    /// <summary>Overload for tests: lets a fake handler stand in for the network.</summary>
+    public BybitClient(BybitConfig cfg, HttpMessageHandler? handler)
     {
         _cfg = cfg;
-        _http = new HttpClient
-        {
-            BaseAddress = new Uri(cfg.BaseUrl.TrimEnd('/') + "/"),
-            Timeout = TimeSpan.FromSeconds(cfg.HttpTimeoutSeconds)
-        };
+        _http = handler is null ? new HttpClient() : new HttpClient(handler);
+        _http.BaseAddress = new Uri(cfg.BaseUrl.TrimEnd('/') + "/");
+        _http.Timeout = TimeSpan.FromSeconds(cfg.HttpTimeoutSeconds);
         _http.DefaultRequestHeaders.Add("User-Agent", "TraderApp/2.0-Bybit");
     }
 
@@ -346,7 +347,10 @@ public sealed class BybitClient : IExchangeClient
             var side = row.Value<string>("side") ?? "";
             var isLong = side.Equals("Buy", StringComparison.OrdinalIgnoreCase);
             var signed = isLong ? size : -size;
-            var created = row.Value<long?>("createdTime") ?? 0;
+            // createdTime is the first time this SYMBOL was ever positioned, so on
+            // a reused symbol it can be days old. Only openTime describes the
+            // current position, and it is 0 when Bybit does not know it.
+            var opened = row.Value<long?>("openTime") ?? 0;
             result.Add(new Position
             {
                 PositionId = SyntheticPositionId.For(symbol, isLong),
@@ -356,7 +360,7 @@ public sealed class BybitClient : IExchangeClient
                 UnrealizedPnl = ParseDec(row.Value<string>("unrealisedPnl")),
                 LiquidationPrice = ParseDec(row.Value<string>("liqPrice")),
                 PositionSide = isLong ? "LONG" : "SHORT",
-                OpenDate = created > 0 ? created / 1000.0 : 0,
+                OpenDate = opened > 0 ? opened / 1000.0 : 0,
                 Margin = ParseDec(row.Value<string>("positionIM"))
             });
         }
@@ -393,8 +397,12 @@ public sealed class BybitClient : IExchangeClient
                 AvgExitPrice = ParseDec(row.Value<string>("avgExitPrice")),
                 ClosedSize = ParseDec(row.Value<string>("qty")),
                 Side = wasLong ? "long" : "short",
-                OpenDate = (row.Value<long?>("createdTime") ?? 0) / 1000,
-                CloseDate = (row.Value<long?>("updatedTime") ?? 0) / 1000
+                OrderId = row.Value<string>("orderId") ?? "",
+                // Bybit's closed-pnl createdTime/updatedTime both stamp the closing
+                // order, not the position opening. Reporting createdTime as the open
+                // date made every trade look like it was held for zero seconds.
+                OpenDate = 0,
+                CloseDate = (row.Value<long?>("updatedTime") ?? row.Value<long?>("createdTime") ?? 0) / 1000
             });
         }
 
@@ -457,13 +465,16 @@ public sealed class BybitClient : IExchangeClient
         return await PlaceReduceOnlyMarketAsync(req, ct);
     }
 
-    public async Task<OrderResponse?> CancelOrderAsync(string market, long orderId, CancellationToken ct)
+    public async Task<OrderResponse?> CancelOrderAsync(string market, string orderId, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(orderId))
+            throw new ArgumentException("Bybit cancel needs the order id the exchange returned", nameof(orderId));
+
         var body = new JObject
         {
             ["category"] = _cfg.Category,
             ["symbol"] = market,
-            ["orderId"] = orderId.ToString(CultureInfo.InvariantCulture)
+            ["orderId"] = orderId
         };
         var root = await PostPrivateAsync("/v5/order/cancel", body, ct);
         return MapOrder(root?["result"], market, null, null, null);
@@ -480,6 +491,64 @@ public sealed class BybitClient : IExchangeClient
         foreach (var row in list)
             result.Add(MapOrder(row, market, row.Value<string>("side"), row.Value<string>("qty"), row.Value<string>("price"))!);
         return result;
+    }
+
+    public async Task<OrderResponse?> GetOrderAsync(string market, string orderId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(orderId)) return null;
+
+        var path = $"/v5/order/history?category={Uri.EscapeDataString(_cfg.Category)}" +
+                   $"&symbol={Uri.EscapeDataString(market)}&orderId={Uri.EscapeDataString(orderId)}&limit=1";
+        var root = await GetPrivateAsync(path, ct);
+        var row = (root?["result"]?["list"] as JArray)?.FirstOrDefault();
+        return row is null
+            ? null
+            : MapOrder(row, market, row.Value<string>("side"), row.Value<string>("qty"), row.Value<string>("price"));
+    }
+
+    /// <summary>
+    /// Replays up to ~500 recent executions (newest first) to find the fill
+    /// that opened the position now held. See <see cref="PositionHistory"/>.
+    /// </summary>
+    public async Task<DateTime?> ResolvePositionOpenedAsync(Position position, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(position.Market) || position.Amount == 0) return null;
+
+        var fills = new List<PositionFill>();
+        string? cursor = null;
+        for (var page = 0; page < 5; page++)
+        {
+            var path = $"/v5/execution/list?category={Uri.EscapeDataString(_cfg.Category)}" +
+                       $"&symbol={Uri.EscapeDataString(position.Market)}&limit=100";
+            if (!string.IsNullOrEmpty(cursor)) path += $"&cursor={Uri.EscapeDataString(cursor)}";
+
+            var root = await GetPrivateAsync(path, ct);
+            var result = root?["result"];
+            foreach (var row in result?["list"] as JArray ?? new JArray())
+            {
+                // Funding settlements move no size and must not count as fills.
+                var execType = row.Value<string>("execType") ?? "Trade";
+                if (execType.Equals("Funding", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var qty = ParseDec(row.Value<string>("execQty"));
+                var ms = row.Value<long?>("execTime") ?? 0;
+                if (qty <= 0 || ms <= 0) continue;
+
+                var buy = string.Equals(row.Value<string>("side"), "Buy", StringComparison.OrdinalIgnoreCase);
+                fills.Add(new PositionFill(
+                    DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime,
+                    buy ? qty : -qty,
+                    row.Value<long?>("seq") ?? 0));
+            }
+
+            var found = PositionHistory.FindOpenTime(position.Amount, fills);
+            if (found is not null) return found;
+
+            cursor = result?.Value<string>("nextPageCursor");
+            if (string.IsNullOrEmpty(cursor)) break;
+        }
+
+        return null;
     }
 
     // ── Transport ───────────────────────────────────────────────────────
@@ -710,16 +779,18 @@ public sealed class BybitClient : IExchangeClient
     private static OrderResponse? MapOrder(JToken? row, string? market, string? side, string? amount, string? price)
     {
         if (row is null) return null;
-        var idRaw = row.Value<string>("orderId") ?? "0";
-        _ = long.TryParse(idRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var orderId);
         return new OrderResponse
         {
-            OrderId = orderId,
+            // Bybit order ids are UUID-like strings. Parsing them as integers
+            // collapsed every id to 0, so cancels hit "order not exists" and
+            // pending entries could not be told apart.
+            OrderId = row.Value<string>("orderId") ?? "",
             ClientOrderId = row.Value<string>("orderLinkId"),
             Market = row.Value<string>("symbol") ?? market,
             Side = side,
             Amount = ParseDec(amount ?? row.Value<string>("qty")),
             Left = ParseDec(row.Value<string>("leavesQty") ?? amount),
+            DealStock = ParseDec(row.Value<string>("cumExecQty")),
             Price = ParseDec(price ?? row.Value<string>("price")),
             Status = row.Value<string>("orderStatus") ?? "New",
             ReduceOnly = row.Value<bool?>("reduceOnly") ?? false

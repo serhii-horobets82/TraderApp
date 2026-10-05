@@ -57,6 +57,9 @@ public sealed class TradeRecord
     public string Side { get; set; } = "";
     public DateTime OpenedUtc { get; set; }
     public DateTime ClosedUtc { get; set; }
+
+    /// <summary>How OpenedUtc was established: venue, executions, saved, placed or first-seen.</summary>
+    public string OpenedSource { get; set; } = "";
     public double HeldMinutes { get; set; }
     public decimal EntryPrice { get; set; }
     public decimal ExitPrice { get; set; }
@@ -157,7 +160,7 @@ public sealed class TradeJournal
         var wins = trades.Where(t => t.IsWin).ToList();
         var losses = trades.Where(t => !t.IsWin).ToList();
         var net = trades.Sum(t => t.NetPnl);
-        var gross = trades.Sum(t => t.GrossPnl + t.Fees); // PnL before trade fees
+        var gross = trades.Sum(t => t.NetPnl + t.Funding + t.Fees); // PnL before trade fees and funding
         var fees = trades.Sum(t => t.Fees);
         var funding = trades.Sum(t => t.Funding);
         var grossWin = wins.Sum(t => t.NetPnl);
