@@ -132,6 +132,28 @@ public class BybitOrderIdTests
     }
 }
 
+public class BybitPrivateStreamTests
+{
+    [Theory]
+    [InlineData("https://api.bybit.com", "wss://stream.bybit.com/v5/private")]
+    [InlineData("https://api-testnet.bybit.com", "wss://stream-testnet.bybit.com/v5/private")]
+    public void Private_stream_uri_matches_the_selected_environment(string apiUrl, string expected)
+    {
+        Assert.Equal(expected, BybitPrivateStream.BuildPrivateStreamUri(apiUrl).ToString().TrimEnd('/'));
+    }
+
+    [Theory]
+    [InlineData("{\"topic\":\"order\"}", true)]
+    [InlineData("{\"topic\":\"execution\"}", true)]
+    [InlineData("{\"topic\":\"position\"}", true)]
+    [InlineData("{\"topic\":\"wallet\"}", false)]
+    [InlineData("not json", false)]
+    public void Only_trading_account_events_wake_the_loop(string message, bool expected)
+    {
+        Assert.Equal(expected, BybitPrivateStream.IsAccountEvent(message));
+    }
+}
+
 public class BybitPositionAgeTests
 {
     private static (BybitClient Client, FakeBybitHandler Fake) Create()

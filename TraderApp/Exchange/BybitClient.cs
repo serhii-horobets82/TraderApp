@@ -24,6 +24,7 @@ public sealed class BybitClient : IExchangeClient
 
     private readonly BybitConfig _cfg;
     private readonly HttpClient _http;
+    private readonly BybitPrivateStream? _privateStream;
     private readonly ConcurrentDictionary<string, (IReadOnlyList<Candle> Candles, DateTime ValidUntilUtc)> _klineCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<IReadOnlyList<Candle>>> _klineInflight = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _futuresGate = new();
@@ -43,6 +44,10 @@ public sealed class BybitClient : IExchangeClient
         _http.BaseAddress = new Uri(cfg.BaseUrl.TrimEnd('/') + "/");
         _http.Timeout = TimeSpan.FromSeconds(cfg.HttpTimeoutSeconds);
         _http.DefaultRequestHeaders.Add("User-Agent", "TraderApp/2.0-Bybit");
+
+        // Tests use a fake REST transport and must never attempt a live socket.
+        if (handler is null && cfg.PrivateWebSocketEnabled)
+            _privateStream = new BybitPrivateStream(cfg);
     }
 
     // ── Public ──────────────────────────────────────────────────────────
@@ -828,5 +833,12 @@ public sealed class BybitClient : IExchangeClient
 
     private static string Truncate(string s) => s.Length <= 400 ? s : s[..400] + "...";
 
-    public void Dispose() => _http.Dispose();
+    public Task WaitForAccountEventOrDelayAsync(TimeSpan maxDelay, CancellationToken ct) =>
+        _privateStream?.WaitForEventOrDelayAsync(maxDelay, ct) ?? Task.Delay(maxDelay, ct);
+
+    public void Dispose()
+    {
+        _privateStream?.Dispose();
+        _http.Dispose();
+    }
 }

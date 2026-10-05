@@ -249,7 +249,11 @@ public sealed class AutoTrader : IAsyncDisposable
                     Log.Error($"tick failed: {ex}");
                 }
 
-                try { await Task.Delay(_cfg.Trading.LoopIntervalMs, ct); }
+                try
+                {
+                    await _client.WaitForAccountEventOrDelayAsync(
+                        TimeSpan.FromMilliseconds(_cfg.Trading.LoopIntervalMs), ct);
+                }
                 catch (OperationCanceledException) { return; }
             }
         }

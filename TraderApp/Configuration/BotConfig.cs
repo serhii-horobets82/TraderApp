@@ -169,6 +169,13 @@ public sealed class BybitConfig
     public int RecvWindowMs { get; set; } = 5_000;
 
     /// <summary>
+    /// Use Bybit's private WebSocket to wake the trading loop promptly after
+    /// an order, execution, or position update. REST still reconciles state.
+    /// Disable temporarily if a network path blocks WebSockets.
+    /// </summary>
+    public bool PrivateWebSocketEnabled { get; set; } = true;
+
+    /// <summary>
     /// Per-venue override for Trading.PostOnlyEntries. Null = use the shared value.
     ///
     /// The right answer genuinely differs by venue. WhiteBIT charges 0.1% maker

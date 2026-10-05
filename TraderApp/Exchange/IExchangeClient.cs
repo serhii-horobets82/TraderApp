@@ -55,6 +55,14 @@ public interface IExchangeClient : IDisposable
     /// </summary>
     Task<DateTime?> ResolvePositionOpenedAsync(Position position, CancellationToken ct) =>
         Task.FromResult<DateTime?>(null);
+
+    /// <summary>
+    /// Wait until the next scheduled reconciliation tick, or return earlier
+    /// when the venue reports an account event. REST remains the source of
+    /// truth; implementations that do not have an event stream simply delay.
+    /// </summary>
+    Task WaitForAccountEventOrDelayAsync(TimeSpan maxDelay, CancellationToken ct) =>
+        Task.Delay(maxDelay, ct);
 }
 
 /// <summary>Exchange-agnostic entry limit (SL/TP attached when the venue supports OTO).</summary>
