@@ -74,9 +74,11 @@ Risk state persists on disk. `ClearHaltOnBoot=true` is now one-shot: it performs
 
 Logs show decisions, order lifecycle, position state and risk events. Every closed trade is appended to a JSON-lines journal with realised PnL, fees and entry context: score, components, ATR, spread, funding, regime, time, risk scale, experiment label and realised entry slippage. Use it for strategy review by market, hour, component and exit reason.
 
-`Trading.ExperimentId` is a label for a fixed configuration, for example `baseline-v1` or `risk-0.50-v1`. Change it whenever a rule, timing or risk configuration changes; the report keeps results separate instead of blending incomparable periods. Run `dotnet run --project TraderApp -- --journal-report` in the deployed image or a workspace with the persistent journal mounted to print the whole-journal summary by experiment and market.
+`Trading.ExperimentId` is a label for a fixed configuration, for example `baseline-v1` or `risk-0.50-v1`. Change it whenever a rule, timing or risk configuration changes; the report keeps results separate instead of blending incomparable periods. The daily Telegram digest is enabled by default and includes the experiment label. Send `/report` to the Telegram bot for the whole-journal summary by experiment and market; no startup flag or Railway shell is required. `--journal-report` remains available for local export.
 
 With `Trading.ShadowSignalsEnabled=true`, the bot also writes exactly one observation per market per fresh closed bar to `Trading.ShadowSignalPath`. It records eligible signals and the reason for every veto (signal, sizing or maker quality), but never submits an order or changes selection. It is the evidence set for deciding whether a gate improves results; it does not claim a rejected signal would have filled or won.
+
+On Railway, add a service volume mounted at `/app/data`. The default journal, shadow observations, session state and position state already use that directory, so no environment variable is needed. Without the volume they remain enabled but are lost when Railway redeploys the container.
 
 | Command | Action |
 |---|---|

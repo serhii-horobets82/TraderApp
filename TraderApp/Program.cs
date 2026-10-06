@@ -244,6 +244,7 @@ internal static class Program
                     var trader = traders[0];
                     commands.On("/status", () => trader.DescribeStatus());
                     commands.On("/positions", () => trader.DescribePositions());
+                    commands.On("/report", () => trader.DescribeJournal());
                     commands.On("/pause", () => trader.Pause());
                     commands.On("/resume", () => trader.Resume());
                 }
@@ -251,6 +252,7 @@ internal static class Program
                 {
                     commands.On("/status", () => string.Join("\n───\n", traders.Select(t => t.DescribeStatus())));
                     commands.On("/positions", () => string.Join("\n───\n", traders.Select(t => t.DescribePositions())));
+                    commands.On("/report", () => string.Join("\n───\n", traders.Select(t => t.DescribeJournal())));
                     commands.On("/pause", () => string.Join("\n", traders.Select(t => t.Pause())));
                     commands.On("/resume", () => string.Join("\n", traders.Select(t => t.Resume())));
                 }

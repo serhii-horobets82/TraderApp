@@ -231,6 +231,8 @@ public sealed class TradeJournal
         var grossLoss = -losses.Sum(t => t.NetPnl);
         var pf = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? decimal.MaxValue : 0m);
         var avgHold = trades.Average(t => t.HeldMinutes);
+        var experiments = trades.Select(t => t.Entry?.ExperimentId)
+            .Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToList();
 
         var sb = new StringBuilder();
         sb.Append(net >= 0 ? "📗 " : "📕 ");
@@ -266,6 +268,9 @@ public sealed class TradeJournal
             .Select(g => $"{Short(g.Key)} {g.Sum(t => t.NetPnl):+0.00;-0.00}");
         if (trades.Select(t => t.Market).Distinct().Count() > 1)
             sb.Append("\nby market: ").Append(string.Join(", ", perMarket));
+
+        if (experiments.Count > 0)
+            sb.Append("\nexperiment: ").Append(string.Join(", ", experiments));
 
         if (equity is { } eq) sb.Append(CultureInfo.InvariantCulture, $"\nBalance {eq:F2} USDT");
         return sb.ToString();

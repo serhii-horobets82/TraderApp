@@ -526,8 +526,10 @@ public sealed class AutoTrader : IAsyncDisposable
         if (!string.Equals(_lastCollateralNotice, noticeKey, StringComparison.Ordinal))
         {
             _lastCollateralNotice = noticeKey;
-            Log.Warn(msg);
-            _telegram?.Send($"⚠️ {_venueLabel}: {msg}");
+            // Expected portfolio composition, not an execution failure. Keep it
+            // observable in Railway and /status without alarming Telegram on
+            // restarts or harmless dust-balance changes.
+            Log.Info(msg);
         }
         return QuoteAdjustedEquity(accountEquity, _excludedCollateralUsd);
     }
@@ -840,6 +842,8 @@ public sealed class AutoTrader : IAsyncDisposable
         var sb = new System.Text.StringBuilder();
         sb.Append($"{(_live ? "🟢" : "⚪")} {_venueLabel} · {(_live ? "LIVE" : "DRY RUN")} · {BuildInfo.Display}\n");
         sb.Append($"Balance  {_lastEquity:F2} USDT ({session:+0.00;-0.00} session)\n");
+        if (_usingQuoteAdjustedRiskEquity)
+            sb.Append($"Risk equity {_lastEquity:F2} USDT · non-USDT collateral excluded {_excludedCollateralUsd:F2}\n");
         sb.Append($"Open     {real.Count}/{_cfg.Risk.MaxConcurrentPositions} · notional {notional:F2}\n");
         sb.Append($"Pending  {_pending.Count} · last tick {age}\n");
         var (attempts, fills) = PostOnlyFillStats();
@@ -853,6 +857,13 @@ public sealed class AutoTrader : IAsyncDisposable
         }
         sb.Append($"Markets  {string.Join(" ", _cfg.Trading.Markets.Select(Short))}");
         return sb.ToString();
+    }
+
+    /// <summary>On-demand journal summary for Telegram; no process flag or shell access required.</summary>
+    public string DescribeJournal()
+    {
+        if (!_journal.Enabled) return $"[{_venueLabel}] Trade journal is disabled.";
+        return $"[{_venueLabel}]\n" + TradeJournal.FormatReport(_journal.ReadAll());
     }
 
     /// <summary>Open positions with their live unrealised PnL, for /positions.</summary>
