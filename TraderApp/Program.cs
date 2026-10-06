@@ -57,6 +57,13 @@ internal static class Program
         if (args.Contains("--telegram-test", StringComparer.OrdinalIgnoreCase))
             return await TelegramNotifier.RunSetupCheckAsync(config.Telegram, CancellationToken.None);
 
+        if (args.Contains("--journal-report", StringComparer.OrdinalIgnoreCase))
+        {
+            var journal = new TradeJournal(config.Trading.TradeJournalPath);
+            Console.WriteLine(TradeJournal.FormatReport(journal.ReadAll()));
+            return 0;
+        }
+
         Log.ToFile(Path.Combine(AppContext.BaseDirectory, "logs", $"trader-{DateTime.UtcNow:yyyyMMdd}.log"));
 
         var errors = config.Validate();
@@ -317,7 +324,7 @@ internal static class Program
     private static readonly HashSet<string> KnownFlags = new(StringComparer.OrdinalIgnoreCase)
     {
         "--signals-only", "--dry-run", "--backtest", "--days", "--sweep", "--fee",
-        "--end-days-ago", "--signal-quality", "--telegram-test",
+        "--end-days-ago", "--signal-quality", "--telegram-test", "--journal-report",
     };
 
     private static BotConfig LoadConfig(string[] _)
@@ -383,7 +390,7 @@ internal static class Program
         }
         Console.WriteLine($"  Timeframes    : {c.Trading.EntryInterval} entry / {c.Trading.RegimeInterval} regime");
         Console.WriteLine($"  Leverage      : {c.Trading.Leverage}x");
-        Console.WriteLine($"  Risk/trade    : {c.Risk.RiskPerTradePct}% of equity" +
+        Console.WriteLine($"  Risk/trade    : {c.Risk.RiskPerTradePct}% live / {c.Risk.TargetRiskPerTradePct}% ceiling" +
                           (c.Risk.ConvictionRiskFloor < 1
                               ? $" (conviction floor x{c.Risk.ConvictionRiskFloor:0.##})"
                               : ""));
@@ -395,6 +402,7 @@ internal static class Program
         Console.WriteLine($"  Weekend risk  : x{c.Risk.WeekendRiskScale:0.##} · entry hours {(c.Trading.EntryHoursUtcStart == c.Trading.EntryHoursUtcEnd ? "any" : $"{c.Trading.EntryHoursUtcStart:00}-{c.Trading.EntryHoursUtcEnd:00} UTC")}");
         Console.WriteLine($"  Partial take  : {(c.Trading.PartialTakeAtR > 0 ? $"{c.Trading.PartialTakeFraction:P0} at {c.Trading.PartialTakeAtR}R, rest to break-even" : "off")} · time stop {c.Trading.MaxPositionMinutes}m");
         Console.WriteLine($"  Book depth    : {(c.Signals.MinBookDepthUsd > 0 ? $"min {c.Signals.MinBookDepthUsd:F0} USDT thin side" : "unchecked")} · journal {(string.IsNullOrWhiteSpace(c.Trading.TradeJournalPath) ? "off" : c.Trading.TradeJournalPath)}");
+        Console.WriteLine($"  Experiment    : {c.Trading.ExperimentId} · shadow {(c.Trading.ShadowSignalsEnabled ? c.Trading.ShadowSignalPath : "off")}");
         Console.WriteLine($"  Trade budget  : {c.Risk.MaxTradesPerHour}/hour, {c.Risk.MaxTradesPerDay}/day UTC");
         Console.WriteLine($"  Loss streak   : {c.Risk.MaxConsecutiveLosses} → {(c.Risk.HaltOnConsecutiveLosses ? "HALT" : $"cooldown {c.Risk.LossCooldownMinutes}m")}");
         Console.WriteLine($"  Break-even    : {(c.Trading.BreakEvenEnabled ? "on" : "off")} · trail at {c.Trading.TrailStartAtR}R · scratch {c.Trading.ScratchUnprofitableMinutes}m{(c.Trading.ScratchOnlyAboveR > -1 ? $" if R > {c.Trading.ScratchOnlyAboveR}" : "")}");

@@ -72,7 +72,11 @@ Risk state persists on disk. `ClearHaltOnBoot=true` is now one-shot: it performs
 
 ## Logs, journal and Telegram
 
-Logs show decisions, order lifecycle, position state and risk events. Every closed trade is appended to a JSON-lines journal with realised PnL, fees and entry context: score, components, ATR, spread, funding, regime, time and risk scale. Use it for strategy review by market, hour, component and exit reason.
+Logs show decisions, order lifecycle, position state and risk events. Every closed trade is appended to a JSON-lines journal with realised PnL, fees and entry context: score, components, ATR, spread, funding, regime, time, risk scale, experiment label and realised entry slippage. Use it for strategy review by market, hour, component and exit reason.
+
+`Trading.ExperimentId` is a label for a fixed configuration, for example `baseline-v1` or `risk-0.50-v1`. Change it whenever a rule, timing or risk configuration changes; the report keeps results separate instead of blending incomparable periods. Run `dotnet run --project TraderApp -- --journal-report` in the deployed image or a workspace with the persistent journal mounted to print the whole-journal summary by experiment and market.
+
+With `Trading.ShadowSignalsEnabled=true`, the bot also writes exactly one observation per market per fresh closed bar to `Trading.ShadowSignalPath`. It records eligible signals and the reason for every veto (signal, sizing or maker quality), but never submits an order or changes selection. It is the evidence set for deciding whether a gate improves results; it does not claim a rejected signal would have filled or won.
 
 | Command | Action |
 |---|---|
@@ -97,6 +101,12 @@ Before lowering the timeframe or increasing trade frequency:
 4. Start with small caps and compare realized execution with the model.
 
 For the current strategy, better execution quality and a demonstrated post-cost edge are more valuable than simply creating more trades.
+
+## Risk ramp to 2%
+
+`Risk.RiskPerTradePct` is the live sizing value. `Risk.TargetRiskPerTradePct` is an explicit ceiling and roadmap target, capped by validation at 2%. The default remains 0.25% because the current notional cap can make actual risk substantially lower than the configured percentage; increasing the percentage alone does not produce a genuine 2% risk position.
+
+Raise risk only after a fixed experiment has enough closed trades and the journal shows positive post-fee expectancy, acceptable realised entry slippage and no risk-control failures. A sensible sequence is 0.25% → 0.50% → 1.0% → 1.5% → 2.0%, with a new `ExperimentId` for each stage. Keep daily and peak drawdown limits coherent with the live stage: a 2% daily cutout means one fully-risked 2% loss can halt the bot for the day.
 
 ## Operational boundaries
 

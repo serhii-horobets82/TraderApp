@@ -79,6 +79,10 @@ public sealed class BotConfig
             errors.Add("Trading.Leverage must be between 1 and 20.");
         if (Risk.RiskPerTradePct is <= 0 or > 2m)
             errors.Add("Risk.RiskPerTradePct must be in (0, 2]. More than 2% of equity per trade is not safe scalping.");
+        if (Risk.TargetRiskPerTradePct is <= 0 or > 2m)
+            errors.Add("Risk.TargetRiskPerTradePct must be in (0, 2].");
+        if (Risk.RiskPerTradePct > Risk.TargetRiskPerTradePct)
+            errors.Add("Risk.RiskPerTradePct cannot exceed Risk.TargetRiskPerTradePct.");
         if (Risk.MaxDailyDrawdownPct is <= 0 or > 20m)
             errors.Add("Risk.MaxDailyDrawdownPct must be in (0, 20].");
         if (Risk.MaxPeakDrawdownPct is < 0 or > 20m)
@@ -412,6 +416,22 @@ public sealed class TradingConfig
     public string TradeJournalPath { get; set; } = "data/trades.jsonl";
 
     /// <summary>
+    /// Human-assigned label for a frozen strategy/configuration experiment. It
+    /// is stamped on every shadow signal and closed trade so results from a
+    /// changed strategy are never silently mixed with the prior one.
+    /// </summary>
+    public string ExperimentId { get; set; } = "baseline-v1";
+
+    /// <summary>
+    /// Append one closed-bar signal evaluation per market, including vetoed
+    /// setups. This is observation only: it never changes entry decisions.
+    /// Empty ShadowSignalPath disables the journal.
+    /// </summary>
+    public bool ShadowSignalsEnabled { get; set; } = true;
+
+    public string ShadowSignalPath { get; set; } = "data/shadow-signals.jsonl";
+
+    /// <summary>
     /// Where per-position management state (verified opening time, stops,
     /// high-water mark, partial-take flag) is kept so a restart resumes the
     /// same trade instead of re-deriving it and resetting its age. Mount a
@@ -575,6 +595,14 @@ public sealed class RiskConfig
 {
     /// <summary>Equity fraction risked per trade, in percent, measured to the bot stop.</summary>
     public decimal RiskPerTradePct { get; set; } = 0.25m;
+
+    /// <summary>
+    /// Informational target for the current risk-ramp stage. This does not
+    /// size orders; RiskPerTradePct remains the live value. Keeping it separate
+    /// makes a 2% ceiling visible without accidentally jumping a deployed bot
+    /// to it before enough journal evidence exists.
+    /// </summary>
+    public decimal TargetRiskPerTradePct { get; set; } = 2m;
 
     /// <summary>Hard ceiling on position notional, in quote currency.</summary>
     public decimal MaxNotionalPerPositionUsd { get; set; } = 40m;

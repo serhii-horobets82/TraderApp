@@ -29,6 +29,11 @@ public sealed record EntryContext(
     double Adx = 0,
     decimal ConvictionScale = 1m)
 {
+    public string ExperimentId { get; init; } = "";
+    public decimal IntendedEntryPrice { get; init; }
+    public decimal IntendedStopPrice { get; init; }
+    public decimal IntendedRiskQuote { get; init; }
+
     public static EntryContext From(
         TradeSignal s, StandAsideSnapshot? aside, decimal riskScale, DateTime nowUtc,
         decimal convictionScale = 1m) => new(
@@ -76,6 +81,8 @@ public sealed class TradeRecord
     public bool Adopted { get; set; }
     public bool PartialTaken { get; set; }
     public EntryContext? Entry { get; set; }
+    /// <summary>Difference between the requested and confirmed average entry, signed adverse to the trade direction.</summary>
+    public decimal? EntrySlippageBps { get; set; }
 
     public bool IsWin => NetPnl > 0;
 }
@@ -147,6 +154,63 @@ public sealed class TradeJournal
             Log.Warn($"trade journal read failed ({_path}): {ex.Message}");
         }
         return result;
+    }
+
+    /// <summary>Reads all valid JSONL records. Malformed historical lines are skipped.</summary>
+    public IReadOnlyList<TradeRecord> ReadAll()
+    {
+        if (_path is null || !File.Exists(_path)) return Array.Empty<TradeRecord>();
+        var result = new List<TradeRecord>();
+        try
+        {
+            string[] lines;
+            lock (_gate) lines = File.ReadAllLines(_path, Encoding.UTF8);
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var record = JsonSerializer.Deserialize<TradeRecord>(line, JsonOptions);
+                    if (record is not null) result.Add(record);
+                }
+                catch { /* one damaged line must not hide a whole experiment */ }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"trade journal read failed ({_path}): {ex.Message}");
+        }
+        return result;
+    }
+
+    /// <summary>Compact, deterministic report for comparing frozen experiments offline.</summary>
+    public static string FormatReport(IReadOnlyList<TradeRecord> trades)
+    {
+        if (trades.Count == 0) return "No closed trades in the journal.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Journal report · {trades.Count} closed trades · {trades.Min(t => t.ClosedUtc):yyyy-MM-dd} to {trades.Max(t => t.ClosedUtc):yyyy-MM-dd} UTC");
+        AppendGroup("All", trades, sb);
+        foreach (var group in trades.GroupBy(t => string.IsNullOrWhiteSpace(t.Entry?.ExperimentId) ? "legacy/unlabelled" : t.Entry.ExperimentId)
+                     .OrderBy(g => g.Key, StringComparer.Ordinal))
+            AppendGroup($"Experiment {group.Key}", group.ToList(), sb);
+        foreach (var group in trades.GroupBy(t => t.Market).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+            AppendGroup($"Market {group.Key}", group.ToList(), sb);
+        return sb.ToString().TrimEnd();
+    }
+
+    private static void AppendGroup(string label, IReadOnlyList<TradeRecord> trades, StringBuilder sb)
+    {
+        var wins = trades.Where(t => t.IsWin).ToList();
+        var gains = wins.Sum(t => t.NetPnl);
+        var losses = -trades.Where(t => !t.IsWin).Sum(t => t.NetPnl);
+        var pf = losses > 0 ? gains / losses : (gains > 0 ? decimal.MaxValue : 0m);
+        var avgR = trades.Where(t => t.RMultiple.HasValue).Select(t => t.RMultiple!.Value).DefaultIfEmpty().Average();
+        var slips = trades.Where(t => t.EntrySlippageBps.HasValue).Select(t => t.EntrySlippageBps!.Value).ToList();
+        sb.Append(CultureInfo.InvariantCulture,
+            $"{label}: net {trades.Sum(t => t.NetPnl):+0.00;-0.00} USDT · {wins.Count}/{trades.Count} wins ({(double)wins.Count / trades.Count:P0}) · PF {(pf == decimal.MaxValue ? "∞" : pf.ToString("F2", CultureInfo.InvariantCulture))} · avg R {avgR:+0.00;-0.00}");
+        if (slips.Count > 0) sb.Append(CultureInfo.InvariantCulture, $" · entry slip {slips.Average():+0.0;-0.0}bp");
+        sb.AppendLine();
     }
 
     /// <summary>

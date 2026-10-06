@@ -153,6 +153,7 @@ public sealed class AutoTrader : IAsyncDisposable
     private DateTime _lastTickUtc;
 
     private readonly TradeJournal _journal;
+    private readonly ShadowSignalJournal _shadowJournal;
     private readonly PositionStateStore _positionStore;
     private readonly Dictionary<string, SavedPosition> _saved = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastPositionSaveUtc = DateTime.MinValue;
@@ -192,6 +193,7 @@ public sealed class AutoTrader : IAsyncDisposable
         _risk = new RiskManager(cfg.Risk, cfg.Trading);
         _live = !cfg.Trading.DryRun;
         _journal = new TradeJournal(cfg.Trading.TradeJournalPath);
+        _shadowJournal = new ShadowSignalJournal(cfg.Trading.ShadowSignalPath, cfg.Trading.ShadowSignalsEnabled);
         _positionStore = new PositionStateStore(cfg.Trading.PositionStatePath);
     }
 
@@ -1030,6 +1032,7 @@ public sealed class AutoTrader : IAsyncDisposable
             var changed = !_lastEntryVetoKey.TryGetValue(market, out var prev) || prev != key;
             _lastEntryVetoKey[market] = key;
             if (logBlocked || changed) Log.Info($"{market}: {signal.Explain()}");
+            if (logBlocked) _shadowJournal.Append(_cfg.Trading.ExperimentId, signal, null, null, false, key);
             return null;
         }
 
@@ -1076,6 +1079,7 @@ public sealed class AutoTrader : IAsyncDisposable
         {
             if (ShouldLogSizingReject(market))
                 Log.Info($"{market}: {signal.Direction} setup rejected by sizing - {sizing.Reason}");
+            if (logBlocked) _shadowJournal.Append(_cfg.Trading.ExperimentId, signal, entryPrice, null, false, "sizing: " + sizing.Reason);
             return null;
         }
 
@@ -1085,8 +1089,15 @@ public sealed class AutoTrader : IAsyncDisposable
             if (!maker.Allowed)
             {
                 Log.Info($"{market}: {signal.Direction} setup rejected by maker quality - {maker.Reason}");
+                if (logBlocked) _shadowJournal.Append(_cfg.Trading.ExperimentId, signal, entryPrice, null, false, "maker: " + maker.Reason);
                 return null;
             }
+        }
+
+        if (logBlocked)
+        {
+            var riskQuote = sizing.Amount * Math.Abs(entryPrice - sizing.StopPrice);
+            _shadowJournal.Append(_cfg.Trading.ExperimentId, signal, entryPrice, riskQuote, true, "eligible");
         }
 
         return new ScannedEntry(signal, book, rules, entryPrice, sizing, aside, conviction, DateTime.UtcNow);
@@ -1132,7 +1143,13 @@ public sealed class AutoTrader : IAsyncDisposable
         // position, so the journal can grade the trade against its setup.
         var riskScale = _risk.RiskScale(convictionScale: scanned.ConvictionScale);
         _entryContext[market] = (
-            EntryContext.From(signal, scanned.Aside, riskScale, DateTime.UtcNow, scanned.ConvictionScale),
+            EntryContext.From(signal, scanned.Aside, riskScale, DateTime.UtcNow, scanned.ConvictionScale) with
+            {
+                ExperimentId = _cfg.Trading.ExperimentId,
+                IntendedEntryPrice = scanned.EntryPrice,
+                IntendedStopPrice = sizing.StopPrice,
+                IntendedRiskQuote = riskQuote
+            },
             DateTime.UtcNow);
 
         if (!_live)
@@ -1602,7 +1619,16 @@ public sealed class AutoTrader : IAsyncDisposable
             Adopted = m.Adopted,
             PartialTaken = m.PartialTaken,
             Entry = m.Entry,
+            EntrySlippageBps = CalculateEntrySlippageBps(t.IsLong, m.Entry?.IntendedEntryPrice, rec.AvgEntryPrice),
         };
+    }
+
+    /// <summary>Positive is worse than requested; negative is price improvement.</summary>
+    private static decimal? CalculateEntrySlippageBps(bool isLong, decimal? intended, decimal actual)
+    {
+        if (intended is null or <= 0 || actual <= 0) return null;
+        var signed = isLong ? actual - intended.Value : intended.Value - actual;
+        return Math.Round(signed / intended.Value * 10_000m, 2);
     }
 
     private async Task ManagePositionAsync(Position pos, CancellationToken ct)
