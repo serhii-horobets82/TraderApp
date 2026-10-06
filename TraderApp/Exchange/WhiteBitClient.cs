@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json;
@@ -62,14 +63,15 @@ public sealed class WhiteBitClient : IExchangeClient
     private DateTime _futuresValidUntil = DateTime.MinValue;
     private Task<FuturesSnapshot>? _futuresInflight;
 
-    public WhiteBitClient(ApiConfig cfg)
+    public WhiteBitClient(ApiConfig cfg) : this(cfg, null) { }
+
+    /// <summary>Overload for transport tests.</summary>
+    public WhiteBitClient(ApiConfig cfg, HttpMessageHandler? handler)
     {
         _cfg = cfg;
-        _http = new HttpClient
-        {
-            BaseAddress = new Uri(cfg.BaseUrl),
-            Timeout = TimeSpan.FromSeconds(cfg.HttpTimeoutSeconds)
-        };
+        _http = handler is null ? new HttpClient() : new HttpClient(handler);
+        _http.BaseAddress = new Uri(cfg.BaseUrl);
+        _http.Timeout = TimeSpan.FromSeconds(cfg.HttpTimeoutSeconds);
         _http.DefaultRequestHeaders.Add("User-Agent", "TraderApp/2.0");
     }
 
@@ -387,8 +389,9 @@ public sealed class WhiteBitClient : IExchangeClient
     {
         for (var attempt = 0; ; attempt++)
         {
-            HttpStatusCode status;
-            string body;
+            HttpStatusCode status = 0;
+            string body = "";
+            Exception? transportFailure = null;
 
             await _privateGate.WaitAsync(ct);
             try
@@ -415,9 +418,26 @@ public sealed class WhiteBitClient : IExchangeClient
                 status = resp.StatusCode;
                 body = await resp.Content.ReadAsStringAsync(ct);
             }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+            {
+                transportFailure = ex;
+            }
             finally
             {
                 _privateGate.Release();
+            }
+
+            if (transportFailure is not null)
+            {
+                // A dropped response is ambiguous for trading mutations: the
+                // exchange might already have accepted the order/close/cancel.
+                // Retry only private reads and idempotent leverage setup; order
+                // lifecycle calls remain reconciled by the normal next tick.
+                if (!CanRetryTransport(endpoint) || attempt >= _cfg.MaxRetries)
+                    ExceptionDispatchInfo.Capture(transportFailure).Throw();
+
+                await Task.Delay(BackoffDelay(attempt), ct);
+                continue;
             }
 
             if (status == HttpStatusCode.OK)
@@ -432,6 +452,18 @@ public sealed class WhiteBitClient : IExchangeClient
 
     private static bool ShouldRetry(HttpStatusCode s) =>
         s == HttpStatusCode.TooManyRequests || (int)s >= 500;
+
+    private static bool CanRetryTransport(string endpoint) => endpoint switch
+    {
+        "/api/v4/collateral-account/summary" or
+        "/api/v4/collateral-account/balance" or
+        "/api/v4/collateral-account/positions/open" or
+        "/api/v4/collateral-account/positions/closed-pnl" or
+        "/api/v4/market/fee/single" or
+        "/api/v4/orders" or
+        "/api/v4/collateral-account/leverage" => true,
+        _ => false
+    };
 
     /// <summary>Exponential backoff starting at 1s, doubling, capped at 30s, with jitter.</summary>
     private static TimeSpan BackoffDelay(int attempt)
