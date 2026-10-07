@@ -26,6 +26,20 @@ public class HardRiskRulesTests
     }
 
     [Fact]
+    public void Session_drawdown_disabled_when_zero()
+    {
+        var rm = Create(c =>
+        {
+            c.MaxDailyDrawdownPct = 0m;
+            c.MaxPeakDrawdownPct = 0m;
+        });
+        rm.InitialiseEquity(10_000m);
+
+        Assert.False(rm.CheckAccountHealth(9_000m, Array.Empty<Position>(), out _));
+        Assert.False(rm.Halted);
+    }
+
+    [Fact]
     public void Peak_drawdown_halts_even_when_still_above_start()
     {
         var rm = Create(c =>

@@ -239,7 +239,7 @@ The settings worth knowing:
 | `Trading.PostOnlyEntries` | `false` | `false` crosses the spread to fill now; `true` rests at the near touch and may not fill |
 | `Trading.PostOnlyFillWarning*` | `5` / `40%` / `180m` | Alert when enough passive entries settle below the configured fill-rate threshold |
 | `Risk.RiskPerTradePct` | `0.25` | Percent of equity lost if the stop is hit |
-| `Risk.MaxDailyDrawdownPct` | `2` | Session-start equity cutout |
+| `Risk.MaxDailyDrawdownPct` | `2` | Session-start equity cutout (`0` disables) |
 | `Risk.MaxPeakDrawdownPct` | `2` | Drawdown from session peak (0 = off) |
 | `Risk.MaxDailyProfitPct` | `3` | Green-day lock threshold (0 = off). 1.5% was two winners at this R profile |
 | `Risk.MaxNotionalPerPositionUsd` | `80` | Must be ≥ what 0.25% risk sizes to (~70 USDT on SOL at 215 equity) or it silently clips the risk |

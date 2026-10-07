@@ -83,8 +83,8 @@ public sealed class BotConfig
             errors.Add("Risk.TargetRiskPerTradePct must be in (0, 2].");
         if (Risk.RiskPerTradePct > Risk.TargetRiskPerTradePct)
             errors.Add("Risk.RiskPerTradePct cannot exceed Risk.TargetRiskPerTradePct.");
-        if (Risk.MaxDailyDrawdownPct is <= 0 or > 20m)
-            errors.Add("Risk.MaxDailyDrawdownPct must be in (0, 20].");
+        if (Risk.MaxDailyDrawdownPct is < 0 or > 20m)
+            errors.Add("Risk.MaxDailyDrawdownPct must be in [0, 20]. 0 disables the session drawdown cutout.");
         if (Risk.MaxPeakDrawdownPct is < 0 or > 20m)
             errors.Add("Risk.MaxPeakDrawdownPct must be in [0, 20]. 0 disables the peak cutout.");
         if (Risk.MaxDailyProfitPct is < 0 or > 50m)
@@ -618,7 +618,7 @@ public sealed class RiskConfig
     /// <summary>One position per market at a time.</summary>
     public bool OnePositionPerMarket { get; set; } = true;
 
-    /// <summary>Session halts (and flattens) when equity falls this far below the session starting equity.</summary>
+    /// <summary>Session halts (and flattens) when equity falls this far below the session starting equity (0 disables).</summary>
     public decimal MaxDailyDrawdownPct { get; set; } = 2m;
 
     /// <summary>
