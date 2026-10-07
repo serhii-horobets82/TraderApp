@@ -290,7 +290,7 @@ public sealed class RiskManager
         if (SessionStartEquity > 0)
         {
             var sessionDdPct = (SessionStartEquity - equity) / SessionStartEquity * 100m;
-            if (sessionDdPct >= _cfg.MaxDailyDrawdownPct)
+            if (_cfg.MaxDailyDrawdownPct > 0 && sessionDdPct >= _cfg.MaxDailyDrawdownPct)
             {
                 reason = $"session drawdown {sessionDdPct:F2}% reached the {_cfg.MaxDailyDrawdownPct}% limit " +
                          $"(equity {equity:F2} vs start {SessionStartEquity:F2})";

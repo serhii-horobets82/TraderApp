@@ -399,7 +399,7 @@ internal static class Program
         Console.WriteLine($"  Stop / target : {c.Trading.StopLossAtrMult}x ATR / {c.Trading.TakeProfitAtrMult}x ATR");
         Console.WriteLine($"  Hard stop     : {c.Trading.HardStopMultiplier}x bot stop, attached to the entry order");
         Console.WriteLine($"  Max positions : {c.Risk.MaxConcurrentPositions} (max {c.Risk.MaxTotalNotionalUsd} notional)");
-        Console.WriteLine($"  Daily cutout  : -{c.Risk.MaxDailyDrawdownPct}% session / -{c.Risk.MaxPeakDrawdownPct}% from peak");
+        Console.WriteLine($"  Daily cutout  : {(c.Risk.MaxDailyDrawdownPct > 0 ? $"-{c.Risk.MaxDailyDrawdownPct}%" : "off")} session / {(c.Risk.MaxPeakDrawdownPct > 0 ? $"-{c.Risk.MaxPeakDrawdownPct}%" : "off")} from peak");
         Console.WriteLine($"  Profit lock   : +{c.Risk.MaxDailyProfitPct}% session → {(c.Risk.ProfitLockRiskScale > 0 ? $"risk x{c.Risk.ProfitLockRiskScale:0.##}" : "HALT")} (0 = off)");
         Console.WriteLine($"  Weekend risk  : x{c.Risk.WeekendRiskScale:0.##} · entry hours {(c.Trading.EntryHoursUtcStart == c.Trading.EntryHoursUtcEnd ? "any" : $"{c.Trading.EntryHoursUtcStart:00}-{c.Trading.EntryHoursUtcEnd:00} UTC")}");
         Console.WriteLine($"  Partial take  : {(c.Trading.PartialTakeAtR > 0 ? $"{c.Trading.PartialTakeFraction:P0} at {c.Trading.PartialTakeAtR}R, rest to break-even" : "off")} · time stop {c.Trading.MaxPositionMinutes}m");
